@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "healer"
+version = "0.1.0"
+description = "Local-first autonomous code remediation system"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "click>=8.1",
+    "tree-sitter>=0.22",
+    "tree-sitter-python>=0.21",
+    "chromadb>=0.5",
+    "langgraph>=0.2",
+    "anthropic>=0.40",
+    "GitPython>=3.1",
+    "paho-mqtt>=2.0",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+healer = "healer.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/healer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+workspace/
+*.egg-info/
+project.md
+.env.example
