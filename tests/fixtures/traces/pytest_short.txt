@@ -1,0 +1,28 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.16, pytest-9.1.1, pluggy-1.6.0
+rootdir: /tmp/sample
+plugins: cov-7.1.0, anyio-4.15.1, langsmith-0.14.2
+collected 3 items
+
+tests/test_app.py FF.                                                    [100%]
+
+=================================== FAILURES ===================================
+___________________________________ test_key ___________________________________
+tests/test_app.py:9: in test_key
+    helper()
+tests/test_app.py:5: in helper
+    return read_db({})
+           ^^^^^^^^^^^
+app/cfg.py:2: in read_db
+    return config["db"]
+           ^^^^^^^^^^^^
+E   KeyError: 'db'
+_________________________________ test_assert __________________________________
+tests/test_app.py:13: in test_assert
+    assert parse_port("2") == 3
+E   AssertionError: assert 2 == 3
+E    +  where 2 = parse_port('2')
+=========================== short test summary info ============================
+FAILED tests/test_app.py::test_key - KeyError: 'db'
+FAILED tests/test_app.py::test_assert - AssertionError: assert 2 == 3
+========================= 2 failed, 1 passed in 0.04s ==========================

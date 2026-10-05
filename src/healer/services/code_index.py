@@ -46,3 +46,8 @@ class CodeIndex:
     def outline(self, file: str) -> list[Symbol]:
         """Structural map of one indexed file: every symbol with its signature and lines."""
         return self._repository.symbols_in_file(file)
+
+    def enclosing_symbol(self, file: str, line: int) -> Symbol | None:
+        """Narrowest indexed symbol of ``file`` whose line range contains ``line``."""
+        containing = [s for s in self.outline(file) if s.start_line <= line <= s.end_line]
+        return min(containing, key=lambda s: s.end_line - s.start_line, default=None)

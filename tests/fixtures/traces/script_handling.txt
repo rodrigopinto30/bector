@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/tmp/sample/main.py", line 15, in <module>
+    read_db({})
+  File "/tmp/sample/app/cfg.py", line 2, in read_db
+    return config["db"]
+           ~~~~~~^^^^^^
+KeyError: 'db'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/sample/main.py", line 17, in <module>
+    parse_port("abc")
+  File "/tmp/sample/app/cfg.py", line 13, in parse_port
+    return int(value)
+           ^^^^^^^^^^
+ValueError: invalid literal for int() with base 10: 'abc'

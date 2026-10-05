@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/tmp/sample/app/cfg.py", line 7, in load
+    return open(path).read()
+           ^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/nope/settings.toml'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/tmp/sample/main.py", line 10, in <module>
+    load("/nope/settings.toml")
+  File "/tmp/sample/app/cfg.py", line 9, in load
+    raise RuntimeError(f"cannot load {path}") from exc
+RuntimeError: cannot load /nope/settings.toml

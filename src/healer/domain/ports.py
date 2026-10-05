@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Iterator
 from typing import Protocol
 
+from healer.domain.diagnosis import TracedError
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 
 
@@ -38,3 +39,23 @@ class SymbolRepository(Protocol):
     def search(self, query: str, limit: int) -> list[SearchHit]: ...
 
     def count(self) -> int: ...
+
+
+class TraceParser(Protocol):
+    """Recovers exceptions from raw output. One implementation per language."""
+
+    def parse(self, text: str) -> list[TracedError]: ...
+
+
+class PathResolver(Protocol):
+    """Maps a path printed in a trace to a file of the workspace."""
+
+    def resolve(self, raw_path: str) -> str | None:
+        """Return the workspace-relative path, or None for files outside the workspace."""
+        ...
+
+
+class SymbolLocator(Protocol):
+    def enclosing_symbol(self, file: str, line: int) -> Symbol | None:
+        """Return the narrowest indexed symbol of ``file`` that contains ``line``."""
+        ...

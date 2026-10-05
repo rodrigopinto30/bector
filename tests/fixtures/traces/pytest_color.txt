@@ -1,0 +1,41 @@
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.11.16, pytest-9.1.1, pluggy-1.6.0
+rootdir: /tmp/sample
+plugins: cov-7.1.0, anyio-4.15.1, langsmith-0.14.2
+collected 3 items
+
+tests/test_app.py [31mF[0m[31mF[0m[32m.[0m[31m                                                    [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m___________________________________ test_key ___________________________________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_key[39;49;00m():[90m[39;49;00m
+>       helper()[90m[39;49;00m
+
+[1m[31mtests/test_app.py[0m:9: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+[1m[31mtests/test_app.py[0m:5: in helper
+    [0m[94mreturn[39;49;00m read_db({})[90m[39;49;00m
+           ^^^^^^^^^^^[90m[39;49;00m
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = {}
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mread_db[39;49;00m(config):[90m[39;49;00m
+>       [94mreturn[39;49;00m config[[33m"[39;49;00m[33mdb[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+               ^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       KeyError: 'db'[0m
+
+[1m[31mapp/cfg.py[0m:2: KeyError
+[31m[1m_________________________________ test_assert __________________________________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_assert[39;49;00m():[90m[39;49;00m
+>       [94massert[39;49;00m parse_port([33m"[39;49;00m[33m2[39;49;00m[33m"[39;49;00m) == [94m3[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: assert 2 == 3[0m
+[1m[31mE        +  where 2 = parse_port('2')[0m
+
+[1m[31mtests/test_app.py[0m:13: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_app.py::[1mtest_key[0m - KeyError: 'db'
+[31mFAILED[0m tests/test_app.py::[1mtest_assert[0m - AssertionError: assert 2 == 3
+[31m========================= [31m[1m2 failed[0m, [32m1 passed[0m[31m in 0.06s[0m[31m ==========================[0m

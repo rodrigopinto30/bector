@@ -11,3 +11,7 @@ class WorkspaceError(HealerError):
 
 class IndexingError(HealerError):
     """The symbol index could not be read or written."""
+
+
+class LogSourceError(HealerError):
+    """The log to diagnose could not be read."""

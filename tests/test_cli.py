@@ -1,3 +1,5 @@
+import json
+import shutil
 from functools import partial
 from pathlib import Path
 
@@ -6,7 +8,7 @@ from typer.testing import CliRunner
 
 from healer import cli
 from healer.config import Settings
-from healer.factory import build_code_index
+from healer.factory import build_code_index, build_diagnoser
 from tests.conftest import FakeEmbeddingFunction
 
 runner = CliRunner()
@@ -77,3 +79,57 @@ def test_settings_ignore_unrelated_variables(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("WORKSPACE_PATH", "./workspace")
     monkeypatch.setenv("MQTT_PORT", "1884")
     assert Settings().mqtt_port == 1884
+
+
+SAMPLE = Path(__file__).parent / "fixtures" / "sample_project"
+TRACES = Path(__file__).parent / "fixtures" / "traces"
+
+
+@pytest.fixture
+def sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    project = tmp_path / "sample"
+    shutil.copytree(SAMPLE, project)
+    monkeypatch.setenv("CHROMA_PATH", str(tmp_path / "chroma"))
+    fake = FakeEmbeddingFunction()
+    monkeypatch.setattr(cli, "build_code_index", partial(build_code_index, embedding_function=fake))
+    monkeypatch.setattr(cli, "build_diagnoser", partial(build_diagnoser, embedding_function=fake))
+    return project
+
+
+@pytest.mark.integration
+def test_diagnose_groups_the_same_bug_and_locates_it(sample: Path) -> None:
+    runner.invoke(cli.app, ["index", str(sample)])
+    log = (TRACES / "script_key.txt").read_text() + (TRACES / "pytest_long.txt").read_text()
+    result = runner.invoke(cli.app, ["diagnose", "--path", str(sample)], input=log)
+    assert result.exit_code == 0
+    assert "[1] KeyError: 'db'" in result.stdout
+    assert "origin     app/cfg.py:2 in read_db" in result.stdout
+    assert "symbol     def read_db(config):  (app/cfg.py:1-2)" in result.stdout
+    assert "seen       2 times" in result.stdout
+    assert "[2] AssertionError: assert 2 == 3" in result.stdout
+
+
+@pytest.mark.integration
+def test_diagnose_json_output(sample: Path) -> None:
+    result = runner.invoke(
+        cli.app, ["diagnose", str(TRACES / "script_chain.txt"), "--path", str(sample), "--json"]
+    )
+    assert result.exit_code == 0
+    [diagnosis] = json.loads(result.stdout)
+    assert diagnosis["error"]["error_type"] == "RuntimeError"
+    assert diagnosis["origin"]["workspace_file"] == "app/cfg.py"
+    assert diagnosis["location"] is None
+    assert len(diagnosis["signature"]) == 64
+
+
+@pytest.mark.integration
+def test_diagnose_without_errors_exits_1(sample: Path) -> None:
+    result = runner.invoke(cli.app, ["diagnose", "--path", str(sample)], input="3 passed\n")
+    assert result.exit_code == 1
+    assert "no errors found" in result.output
+
+
+def test_diagnose_missing_log_exits_2(tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, ["diagnose", str(tmp_path / "nope.log"), "-p", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "Cannot read log" in result.output

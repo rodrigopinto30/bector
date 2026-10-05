@@ -9,9 +9,12 @@ from chromadb.api.types import EmbeddingFunction
 
 from healer.adapters.chroma_repository import ChromaSymbolRepository
 from healer.adapters.python_parser import PythonParser
+from healer.adapters.python_traceback import PythonTraceParser
+from healer.adapters.workspace_paths import WorkspacePathResolver
 from healer.adapters.workspace_scanner import WorkspaceScanner
 from healer.config import Settings
 from healer.services.code_index import CodeIndex
+from healer.services.diagnoser import Diagnoser
 
 
 def collection_name(root: Path) -> str:
@@ -28,3 +31,13 @@ def build_code_index(
     client = chromadb.PersistentClient(path=str(settings.chroma_path))
     repository = ChromaSymbolRepository(client, collection_name(scanner.root), embedding_function)
     return CodeIndex(scanner, PythonParser(), repository)
+
+
+def build_diagnoser(
+    workspace: Path,
+    settings: Settings,
+    embedding_function: EmbeddingFunction[Any] | None = None,
+) -> Diagnoser:
+    resolver = WorkspacePathResolver(workspace)
+    code_index = build_code_index(workspace, settings, embedding_function)
+    return Diagnoser(PythonTraceParser(), resolver, code_index)

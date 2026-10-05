@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 from pathlib import Path
 from typing import Annotated
@@ -6,9 +7,11 @@ from typing import Annotated
 import typer
 
 from healer import __version__
+from healer.adapters.log_reader import read_log
 from healer.config import Settings
+from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
-from healer.factory import build_code_index
+from healer.factory import build_code_index, build_diagnoser
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
 
@@ -45,7 +48,7 @@ def doctor() -> None:
 
 @app.command()
 def run(command: str = typer.Argument(..., help="Test command to run, e.g. 'pytest'")) -> None:
-    """Run a command and remediate failures (Phases 3-4)."""
+    """Run a command and remediate failures (Phase 4)."""
     typer.echo("Not implemented yet.")
     raise typer.Exit(code=1)
 
@@ -117,6 +120,56 @@ def map_file(
     module = symbols[0]
     if module.imports:
         typer.echo(f"imports: {', '.join(module.imports)}")
+
+
+@app.command()
+def diagnose(
+    log: Annotated[
+        Path | None, typer.Argument(help="Log file with the failure; reads stdin when omitted")
+    ] = None,
+    path: WorkspaceOption = Path("."),
+    as_json: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON")] = False,
+) -> None:
+    """Turn a traceback or pytest output into structured error diagnoses."""
+    try:
+        text = read_log(None if log is None or str(log) == "-" else log)
+        diagnoses = build_diagnoser(path, Settings()).diagnose(text)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if as_json:
+        typer.echo(json.dumps([d.model_dump(mode="json") for d in diagnoses], indent=2))
+    else:
+        for number, diagnosis in enumerate(diagnoses, start=1):
+            _print_diagnosis(number, diagnosis)
+    if not diagnoses:
+        typer.echo("no errors found in the log", err=True)
+        raise typer.Exit(code=1)
+
+
+def _print_diagnosis(number: int, d: Diagnosis) -> None:
+    in_workspace = sum(1 for f in d.error.frames if f.workspace_file)
+    typer.echo(f"[{number}] {d.error.summary}")
+    typer.echo(f"    signature  {d.signature[:12]}")
+    if d.origin is None:
+        typer.echo("    origin     no frame inside the workspace")
+    else:
+        where = f" in {d.origin.function}" if d.origin.function else ""
+        typer.echo(f"    origin     {d.origin.workspace_file}:{d.origin.line}{where}")
+        if d.origin.code:
+            typer.echo(f"    code       {d.origin.code}")
+        if d.location is None:
+            typer.echo("    symbol     not indexed (run 'healer index')")
+        else:
+            s = d.location
+            label = s.signature or f"module {s.name}"
+            typer.echo(f"    symbol     {label}  ({s.file}:{s.start_line}-{s.end_line})")
+    typer.echo(f"    frames     {len(d.error.frames)} ({in_workspace} in workspace)")
+    for cause in d.error.causes:
+        typer.echo(f"    caused by  {cause}")
+    if d.occurrences > 1:
+        typer.echo(f"    seen       {d.occurrences} times")
+    typer.echo("")
 
 
 @app.command()

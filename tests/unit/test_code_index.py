@@ -111,3 +111,31 @@ def test_outline_returns_symbols_of_the_file() -> None:
     code_index.index()
     assert [s.file for s in code_index.outline("a.py")] == ["a.py"]
     assert code_index.outline("missing.py") == []
+
+
+def test_enclosing_symbol_picks_the_narrowest_range() -> None:
+    def symbol(name: str, kind: SymbolKind, start: int, end: int) -> Symbol:
+        return Symbol(
+            file="a.py",
+            kind=kind,
+            name=name,
+            qualified_name=name,
+            start_line=start,
+            end_line=end,
+            source="",
+        )
+
+    code_index, _, _, repo = build({})
+    repo.files["a.py"] = (
+        "h",
+        [
+            symbol("a", SymbolKind.MODULE, 1, 30),
+            symbol("Repo", SymbolKind.CLASS, 5, 20),
+            symbol("Repo.save", SymbolKind.METHOD, 10, 12),
+        ],
+    )
+    assert code_index.enclosing_symbol("a.py", 11).name == "Repo.save"  # type: ignore[union-attr]
+    assert code_index.enclosing_symbol("a.py", 6).name == "Repo"  # type: ignore[union-attr]
+    assert code_index.enclosing_symbol("a.py", 25).name == "a"  # type: ignore[union-attr]
+    assert code_index.enclosing_symbol("a.py", 99) is None
+    assert code_index.enclosing_symbol("missing.py", 1) is None

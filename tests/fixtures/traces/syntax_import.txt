@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/tmp/sample/import_bad.py", line 1, in <module>
+    import bad
+  File "/tmp/sample/bad.py", line 4
+    def broken(:
+               ^
+SyntaxError: invalid syntax
