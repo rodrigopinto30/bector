@@ -37,6 +37,7 @@ packages = ["src/healer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["fixtures"]
 markers = ["integration: touches Chroma on a temporary path or other real infrastructure"]
 
 [tool.ruff]

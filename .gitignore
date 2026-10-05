@@ -5,7 +5,6 @@ __pycache__/
 workspace/
 *.egg-info/
 project.md
-.env.example
 .coverage
 .mypy_cache/
 .ruff_cache/
