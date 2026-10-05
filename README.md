@@ -13,10 +13,10 @@ At this stage the scope is **Python projects only**.
 ## How it works
 
 ```text
-CLI / Logs -> Healer -> CodeIndex & Chroma -> LangGraph -> Test Runner -> User
+CLI / Logs -> Diagnoser -> CodeIndex & Chroma -> LangGraph -> Test Runner -> User
 ```
 
-1. **Healer** parses the failure into a structured diagnosis.
+1. **Diagnoser** parses the failure into a structured diagnosis with a machine-independent signature.
 2. **CodeIndex** (Tree-sitter + Chroma) retrieves the minimal relevant code.
 3. **LangGraph** orchestrates the loop: it proposes a patch, applies it in an isolated copy, and runs the tests. If they fail, it retries.
 4. The validated fix is **recommended** to the developer.
@@ -82,10 +82,36 @@ docker compose exec healer healer map app/config.py  # signatures and line range
 ```
 
 - `index` makes the index mirror the workspace: new and changed files are parsed, deleted files are removed. A second run with no changes parses nothing.
-- Files with syntax errors are still indexed with every definition that could be recognised, because broken code is exactly what the Healer will analyze.
+- Files with syntax errors are still indexed with every definition that could be recognised, because broken code is exactly what the Diagnoser points at.
 - Each workspace has its own Chroma collection, so two projects with the same relative paths never mix.
 - Symlinks that resolve outside the workspace are skipped, as are files over 1 MB, non-UTF-8 files, and folders such as `.git`, `.venv` and `node_modules`.
 - `search` prints the cosine distance first (lower is more similar), then `file:lines` and the signature.
+
+## Diagnoser: turn a failure into a diagnosis
+
+`healer diagnose` reads raw output (a log file, or stdin) and prints one diagnosis per distinct error:
+
+```bash
+docker compose exec healer sh -c 'python main.py 2>&1 | healer diagnose'
+docker compose exec healer sh -c 'python -m pytest 2>&1 | healer diagnose'
+docker compose exec healer healer diagnose error.log --json
+```
+
+```text
+[1] KeyError: 'db'
+    signature  de1466b3373f
+    origin     app/cfg.py:3 in read_db
+    code       return config["db"]
+    symbol     def read_db(config):  (app/cfg.py:1-3)
+    frames     2 (2 in workspace)
+```
+
+- **Formats:** standard Python tracebacks (including chained exceptions and syntax errors) and pytest reports in the long, short, native and collection-error formats. ANSI colors are ignored. Exception groups are not supported yet.
+- **Origin:** the innermost frame that belongs to the workspace, which is where the fix most likely goes. Paths printed on another machine or in CI are matched to workspace files by their longest existing suffix. Library, standard-library and `<frozen>` frames never count as workspace files, and paths that escape the workspace are rejected.
+- **Symbol:** the narrowest indexed function, method or class that contains the origin line. Run `healer index` first, otherwise it shows `not indexed`.
+- **Signature:** a SHA-256 of the error type, the message with values, paths, numbers and addresses replaced by placeholders, and the frames from the origin inward. The same bug gets the same signature on any machine and from any entry point (a script or a test), so repeated errors are grouped with `seen N times`.
+- **Exit codes:** `0` when errors were found, `1` when the log has none, `2` when the log cannot be read.
+- `--json` prints the full diagnosis (frames, origin, enclosing symbol with its source, signature and its basis), the contract the later phases consume.
 
 ## Development
 
