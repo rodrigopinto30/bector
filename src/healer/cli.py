@@ -11,7 +11,7 @@ from healer.adapters.log_reader import read_log
 from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
-from healer.factory import build_code_index, build_diagnoser
+from healer.factory import build_code_index, build_diagnoser, build_sandbox_runner
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
 
@@ -170,6 +170,62 @@ def _print_diagnosis(number: int, d: Diagnosis) -> None:
     if d.occurrences > 1:
         typer.echo(f"    seen       {d.occurrences} times")
     typer.echo("")
+
+
+_PYTEST_EXIT_CODES = {
+    0: "passed",
+    1: "tests failed",
+    2: "interrupted",
+    3: "internal error",
+    4: "usage error",
+    5: "no tests collected",
+}
+
+
+@app.command(name="test")
+def test_command(
+    command: Annotated[
+        str | None,
+        typer.Argument(help="Test command; defaults to TEST_COMMAND ('python -m pytest')"),
+    ] = None,
+    path: WorkspaceOption = Path("."),
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", min=1, help="Seconds before the run is killed")
+    ] = None,
+    show_output: Annotated[
+        bool, typer.Option("--output", help="Also print the captured test output")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON")] = False,
+) -> None:
+    """Run the tests on an isolated copy of the workspace and diagnose the failures."""
+    settings = Settings()
+    try:
+        runner = build_sandbox_runner(path, settings, timeout_seconds=timeout)
+        report = runner.run_tests(command or settings.test_command)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    result = report.result
+    if as_json:
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
+        raise typer.Exit(code=0 if result.passed else 1)
+    if result.exit_code is None:
+        status = "timed out"
+    else:
+        label = _PYTEST_EXIT_CODES.get(result.exit_code, "failed")
+        status = f"{label} (exit {result.exit_code})"
+    typer.echo(f"sandbox    {report.files_copied} files copied to an isolated copy, then deleted")
+    typer.echo(f"command    {' '.join(result.command)}")
+    typer.echo(f"result     {status} in {result.duration_seconds:.1f}s")
+    if result.output_truncated:
+        typer.echo("output     truncated: only the last part was kept")
+    if show_output:
+        typer.echo("")
+        typer.echo(result.output.rstrip())
+    typer.echo("")
+    for number, diagnosis in enumerate(report.diagnoses, start=1):
+        _print_diagnosis(number, diagnosis)
+    raise typer.Exit(code=0 if result.passed else 1)
 
 
 @app.command()
