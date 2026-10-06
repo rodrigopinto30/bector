@@ -113,6 +113,33 @@ docker compose exec healer healer diagnose error.log --json
 - **Exit codes:** `0` when errors were found, `1` when the log has none, `2` when the log cannot be read.
 - `--json` prints the full diagnosis (frames, origin, enclosing symbol with its source, signature and its basis), the contract the later phases consume.
 
+## Sandbox runner: run the tests on an isolated copy
+
+`healer test` copies the workspace to a private temporary directory, runs the test command there, diagnoses the failures and deletes the copy. Your files are never modified.
+
+```bash
+docker compose exec healer healer test                                   # runs TEST_COMMAND (python -m pytest)
+docker compose exec healer healer test "python -m pytest tests/test_app.py" --timeout 60
+docker compose exec healer healer test --output                          # also print the captured output
+docker compose exec healer healer test --json
+```
+
+```text
+sandbox    5 files copied to an isolated copy, then deleted
+command    python -m pytest
+result     tests failed (exit 1) in 1.3s
+
+[1] KeyError: 'db'
+    ...
+```
+
+- **Allowlist:** only commands that start with an entry of `ALLOWED_TEST_COMMANDS` run (default `pytest` and `python -m pytest`). There is no shell, so `;`, `&&` or `|` are plain arguments. Arguments with absolute paths, `~` or `..` are rejected, because they would read or write outside the copy.
+- **Limits:** the run is killed after `TEST_TIMEOUT_SECONDS` (default 300) together with every process it started; output is capped at `MAX_OUTPUT_BYTES` (default 1 MB, keeping the end); workspaces over `MAX_SANDBOX_BYTES` (default 500 MB) are refused.
+- **Clean environment:** the tests only see `PATH`, `HOME`, locale and terminal variables. Credentials such as `ANTHROPIC_API_KEY` never reach them.
+- **What is copied:** files and symlinks (as links, never followed). `.git`, virtual environments, `node_modules`, build output and caches are skipped.
+- **Exit codes:** `0` when the tests pass, `1` when they fail or time out, `2` when the command is not allowed or cannot start.
+- Prefer `python -m pytest` over `pytest`: it adds the project root to the import path, so `from app import ...` works without extra configuration.
+
 ## Development
 
 The development tools run inside the container (the host does not need Python packages). The container starts in `/workspace`, so point it at the project in `/app` with `-w /app`:
