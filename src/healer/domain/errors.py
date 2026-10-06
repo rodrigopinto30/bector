@@ -15,3 +15,15 @@ class IndexingError(HealerError):
 
 class LogSourceError(HealerError):
     """The log to diagnose could not be read."""
+
+
+class CommandNotAllowedError(HealerError):
+    """A command is not in the allowlist or has arguments that escape the sandbox."""
+
+
+class ExecutionError(HealerError):
+    """A command could not be started."""
+
+
+class SandboxError(HealerError):
+    """The isolated copy of the workspace could not be created."""

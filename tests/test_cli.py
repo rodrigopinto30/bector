@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from healer import cli
 from healer.config import Settings
-from healer.factory import build_code_index, build_diagnoser
+from healer.factory import build_code_index, build_diagnoser, build_sandbox_runner
 from tests.conftest import FakeEmbeddingFunction
 
 runner = CliRunner()
@@ -93,6 +93,9 @@ def sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     fake = FakeEmbeddingFunction()
     monkeypatch.setattr(cli, "build_code_index", partial(build_code_index, embedding_function=fake))
     monkeypatch.setattr(cli, "build_diagnoser", partial(build_diagnoser, embedding_function=fake))
+    monkeypatch.setattr(
+        cli, "build_sandbox_runner", partial(build_sandbox_runner, embedding_function=fake)
+    )
     return project
 
 
@@ -133,3 +136,35 @@ def test_diagnose_missing_log_exits_2(tmp_path: Path) -> None:
     result = runner.invoke(cli.app, ["diagnose", str(tmp_path / "nope.log"), "-p", str(tmp_path)])
     assert result.exit_code == 2
     assert "Cannot read log" in result.output
+
+
+@pytest.mark.integration
+def test_test_command_runs_in_a_sandbox_and_diagnoses(sample: Path) -> None:
+    before = sorted(p.relative_to(sample) for p in sample.rglob("*"))
+    result = runner.invoke(
+        cli.app, ["test", "python -m pytest tests/test_app.py", "--path", str(sample)]
+    )
+    assert result.exit_code == 1
+    assert "result     tests failed (exit 1)" in result.stdout
+    assert "[1] KeyError: 'db'" in result.stdout
+    assert "[2] AssertionError: assert 2 == 3" in result.stdout
+    assert sorted(p.relative_to(sample) for p in sample.rglob("*")) == before
+
+
+@pytest.mark.integration
+def test_test_command_passing_run(sample: Path) -> None:
+    (sample / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    result = runner.invoke(
+        cli.app,
+        ["test", "python -m pytest tests/test_ok.py", "--path", str(sample), "--json"],
+    )
+    assert result.exit_code == 0
+    report = json.loads(result.stdout)
+    assert report["result"]["exit_code"] == 0
+    assert report["diagnoses"] == []
+
+
+def test_test_command_rejects_commands_outside_the_allowlist(tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, ["test", "rm -rf /", "--path", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "Command not allowed" in result.output
