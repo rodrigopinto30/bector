@@ -11,6 +11,7 @@ from healer.adapters.log_reader import read_log
 from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
+from healer.domain.redaction import Redactor
 from healer.factory import build_code_index, build_diagnoser, build_sandbox_runner
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
@@ -226,6 +227,27 @@ def test_command(
     for number, diagnosis in enumerate(report.diagnoses, start=1):
         _print_diagnosis(number, diagnosis)
     raise typer.Exit(code=0 if result.passed else 1)
+
+
+@app.command()
+def redact(
+    source: Annotated[
+        Path | None, typer.Argument(help="File to redact; reads stdin when omitted")
+    ] = None,
+) -> None:
+    """Print the text with secrets replaced by [REDACTED:<kind>] placeholders."""
+    try:
+        text = read_log(None if source is None or str(source) == "-" else source)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    result = Redactor().redact(text)
+    typer.echo(result.text, nl=False)
+    if result.total:
+        details = ", ".join(f"{kind} {n}" for kind, n in sorted(result.counts.items()))
+        typer.echo(f"redacted {result.total} secrets: {details}", err=True)
+    else:
+        typer.echo("no secrets found", err=True)
 
 
 @app.command()
