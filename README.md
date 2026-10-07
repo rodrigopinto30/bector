@@ -140,6 +140,31 @@ result     tests failed (exit 1) in 1.3s
 - **Exit codes:** `0` when the tests pass, `1` when they fail or time out, `2` when the command is not allowed or cannot start.
 - Prefer `python -m pytest` over `pytest`: it adds the project root to the import path, so `from app import ...` works without extra configuration.
 
+## Redaction: hide secrets before anything leaves the machine
+
+`healer redact` prints a file (or stdin) with every credential replaced by a `[REDACTED:<kind>]` placeholder, and reports on stderr how many were hidden. The file itself is never modified. The same redactor runs on every diagnosis before it is sent to Claude (Phase 4) or published to other nodes (Phase 5).
+
+```bash
+docker compose exec healer healer redact settings.env
+docker compose exec healer sh -c 'python main.py 2>&1 | healer redact'
+```
+
+```text
+DB_PASSWORD=[REDACTED:secret_assignment]
+DATABASE_URL=postgres://admin:[REDACTED:url_credentials]@db:5432/app
+ANTHROPIC_API_KEY=[REDACTED:anthropic_key]
+redacted 3 secrets: anthropic_key 1, secret_assignment 1, url_credentials 1
+```
+
+The policy hides too much rather than too little, because a leaked credential cannot be taken back. It applies, in order:
+
+1. **Known formats:** private keys, Anthropic, OpenAI, AWS, GitHub, Slack, Stripe and Google API keys, and JWTs.
+2. **Credentials in context:** passwords inside URLs (`scheme://user:password@host`) and `Authorization` / `Bearer` headers. The user, host and header name stay visible.
+3. **Secret-looking names:** any value assigned to a name containing `password`, `secret`, `token`, `api_key`, `credential` and similar, quoted or not (`.env`, YAML, Python, JSON, `--flag=value`). Code that only refers to a secret (`os.environ[...]`, `settings.api_key`, `None`, type annotations, function calls) is kept.
+4. **Random-looking strings:** 24+ characters with letters and digits, a long unbroken run and high entropy. Identifiers, paths and UUIDs are kept; hashes such as Git SHAs are hidden.
+
+The counts never include the values. Redacting already redacted text changes nothing.
+
 ## Development
 
 The development tools run inside the container (the host does not need Python packages). The container starts in `/workspace`, so point it at the project in `/app` with `-w /app`:
