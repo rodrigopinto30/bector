@@ -135,7 +135,7 @@ def test_diagnose_without_errors_exits_1(sample: Path) -> None:
 def test_diagnose_missing_log_exits_2(tmp_path: Path) -> None:
     result = runner.invoke(cli.app, ["diagnose", str(tmp_path / "nope.log"), "-p", str(tmp_path)])
     assert result.exit_code == 2
-    assert "Cannot read log" in result.output
+    assert "Cannot read" in result.output
 
 
 @pytest.mark.integration
@@ -168,3 +168,20 @@ def test_test_command_rejects_commands_outside_the_allowlist(tmp_path: Path) -> 
     result = runner.invoke(cli.app, ["test", "rm -rf /", "--path", str(tmp_path)])
     assert result.exit_code == 2
     assert "Command not allowed" in result.output
+
+
+def test_redact_command_hides_secrets_and_reports_counts(tmp_path: Path) -> None:
+    config = tmp_path / "settings.env"
+    config.write_text("DEBUG=true\nDB_PASSWORD=hunter2\nDATABASE_URL=postgres://u:pw1@db/app\n")
+    result = runner.invoke(cli.app, ["redact", str(config)])
+    assert result.exit_code == 0
+    assert "hunter2" not in result.stdout and "pw1" not in result.stdout
+    assert "DEBUG=true" in result.stdout
+    assert "redacted 2 secrets: secret_assignment 1, url_credentials 1" in result.output
+
+
+def test_redact_command_without_secrets() -> None:
+    result = runner.invoke(cli.app, ["redact"], input="nothing to hide\n")
+    assert result.exit_code == 0
+    assert "nothing to hide" in result.stdout
+    assert "no secrets found" in result.output

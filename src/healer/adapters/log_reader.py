@@ -23,7 +23,7 @@ def read_log(source: Path | None, *, max_bytes: int = DEFAULT_MAX_LOG_BYTES) -> 
         with source.open("rb") as stream:
             return _read(stream, str(source), max_bytes)
     except OSError as exc:
-        raise LogSourceError(f"Cannot read log {source}: {exc.strerror}") from exc
+        raise LogSourceError(f"Cannot read {source}: {exc.strerror}") from exc
 
 
 def _read(stream: BinaryIO, name: str, max_bytes: int) -> str:
