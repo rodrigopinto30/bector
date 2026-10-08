@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import CommandNotAllowedError
+from healer.domain.patch import AppliedPatch
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
@@ -31,13 +32,16 @@ class RunResult(BaseModel):
 
 
 class RunReport(BaseModel):
-    """A test run in a sandbox plus the diagnosis of whatever failed."""
+    """A test run in a sandbox, the patch applied first (if any) and what failed."""
 
     model_config = ConfigDict(frozen=True)
 
     result: RunResult
     files_copied: int = Field(ge=0)
     diagnoses: tuple[Diagnosis, ...] = ()
+    patch: AppliedPatch | None = Field(
+        default=None, description="The patch applied to the copy before running, if any."
+    )
 
 
 class CommandPolicy:

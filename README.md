@@ -140,6 +140,39 @@ result     tests failed (exit 1) in 1.3s
 - **Exit codes:** `0` when the tests pass, `1` when they fail or time out, `2` when the command is not allowed or cannot start.
 - Prefer `python -m pytest` over `pytest`: it adds the project root to the import path, so `from app import ...` works without extra configuration.
 
+## Patches: apply a change to the copy and test it
+
+`healer patch` applies a patch to an isolated copy of the workspace, prints the diff, and runs the tests against it. It answers "does this change fix the tests?" without touching your files. In Phase 4 the patches will come from Claude; for now they are written by hand.
+
+A patch is a JSON list of search-and-replace edits:
+
+```json
+{
+  "description": "Default to postgres when the db key is missing",
+  "edits": [
+    {"path": "app/cfg.py", "old": "    return config[\"db\"]", "new": "    return config.get(\"db\", \"postgres\")"},
+    {"path": "tests/test_defaults.py", "old": "", "new": "def test_default(): ...\n"}
+  ]
+}
+```
+
+```bash
+docker compose exec healer healer patch fix.json
+docker compose exec healer healer patch fix.json "python -m pytest tests/test_app.py" --json
+```
+
+```text
+patch      2 edits in 2 files (+2 -2), applied to the copy only
+...
+verdict    the tests pass with this patch
+```
+
+- **Search and replace, not line numbers.** `old` must appear exactly once in the file; an empty `old` creates a new file. If the text is not found verbatim, a unique match that ignores trailing whitespace is accepted. Missing or ambiguous text is rejected with a clear message. This format is far more reliable for an LLM than a unified diff with line numbers.
+- **All or nothing.** Every edit is computed in memory first; nothing is written unless all of them fit.
+- **Safe paths.** Absolute paths, `..`, `~`, Windows drives, `.git`, `.hg`, `.svn` and `.healer` are rejected, and so is writing through a symlink.
+- **Limits.** At most `MAX_PATCH_FILES` files (default 5), `MAX_PATCH_BYTES` of edit text (default 100 KB) and `MAX_PATCH_CHANGED_LINES` changed lines (default 300).
+- **Exit codes:** `0` when the tests pass with the patch, `1` when they still fail (the failures are diagnosed), `2` when the patch is invalid or does not fit the code.
+
 ## Redaction: hide secrets before anything leaves the machine
 
 `healer redact` prints a file (or stdin) with every credential replaced by a `[REDACTED:<kind>]` placeholder, and reports on stderr how many were hidden. The file itself is never modified. The same redactor runs on every diagnosis before it is sent to Claude (Phase 4) or published to other nodes (Phase 5).

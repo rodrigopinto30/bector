@@ -7,6 +7,7 @@ from typing import Protocol
 from healer.domain.diagnosis import TracedError
 from healer.domain.execution import RunResult
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
+from healer.domain.patch import AppliedPatch, Patch
 
 
 class SourceScanner(Protocol):
@@ -85,3 +86,9 @@ class CommandRunner(Protocol):
     """Runs an already validated argv, without a shell, under time and output limits."""
 
     def run(self, argv: Sequence[str], cwd: Path) -> RunResult: ...
+
+
+class PatchApplier(Protocol):
+    def apply(self, patch: Patch, root: Path) -> AppliedPatch:
+        """Apply every edit under ``root`` or none of them."""
+        ...

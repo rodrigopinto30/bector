@@ -18,3 +18,6 @@ class Settings(BaseSettings):
     test_timeout_seconds: float = 300.0
     max_output_bytes: int = 1_000_000
     max_sandbox_bytes: int = 500_000_000
+    max_patch_files: int = 5
+    max_patch_bytes: int = 100_000
+    max_patch_changed_lines: int = 300

@@ -27,3 +27,11 @@ class ExecutionError(HealerError):
 
 class SandboxError(HealerError):
     """The isolated copy of the workspace could not be created."""
+
+
+class InvalidPatchError(HealerError):
+    """A patch breaks the rules: unsafe path, too large, or not text."""
+
+
+class PatchConflictError(HealerError):
+    """A patch does not fit the current code: the text to replace is missing or ambiguous."""

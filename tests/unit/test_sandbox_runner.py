@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 
 from healer.domain.diagnosis import Diagnosis
-from healer.domain.errors import CommandNotAllowedError, ExecutionError
+from healer.domain.errors import CommandNotAllowedError, ExecutionError, InvalidPatchError
 from healer.domain.execution import CommandPolicy, RunResult
+from healer.domain.patch import AppliedPatch, FileEdit, Patch, PatchPolicy
 from healer.services.sandbox_runner import SandboxRunner
 
 
@@ -63,12 +64,24 @@ class FakeDiagnoser:
         return []
 
 
+class FakeApplier:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Patch, Path]] = []
+
+    def apply(self, patch: Patch, root: Path) -> AppliedPatch:
+        self.calls.append((patch, root))
+        return AppliedPatch(files=patch.files, diff="+x\n", lines_added=1, lines_removed=0)
+
+
 POLICY = CommandPolicy(["python -m pytest"])
+PATCH_POLICY = PatchPolicy(max_files=2, max_bytes=1_000)
+PATCH = Patch(edits=(FileEdit(path="app/cfg.py", old="a", new="b"),))
 
 
 def build(runner: FakeRunner) -> tuple[SandboxRunner, FakeProvider, FakeDiagnoser]:
     provider, diagnoser = FakeProvider(), FakeDiagnoser()
-    return SandboxRunner(provider, runner, POLICY, diagnoser), provider, diagnoser  # type: ignore[arg-type]
+    service = SandboxRunner(provider, runner, POLICY, diagnoser, FakeApplier(), PATCH_POLICY)  # type: ignore[arg-type]
+    return service, provider, diagnoser
 
 
 def test_runs_inside_the_sandbox_and_closes_it() -> None:
@@ -107,3 +120,25 @@ def test_sandbox_is_closed_even_when_the_runner_fails() -> None:
     with pytest.raises(ExecutionError):
         service.run_tests("python -m pytest")
     assert provider.created[0].closed
+
+
+def test_patch_is_applied_to_the_sandbox_before_running() -> None:
+    service, provider, _ = build(FakeRunner(0))
+    report = service.run_tests("python -m pytest", patch=PATCH)
+    applier = service._applier  # type: ignore[attr-defined]
+    assert applier.calls == [(PATCH, Path("/sandbox"))]
+    assert report.patch is not None and report.patch.files == ("app/cfg.py",)
+    assert provider.created[0].closed
+
+
+def test_invalid_patch_never_creates_a_sandbox() -> None:
+    service, provider, _ = build(FakeRunner(0))
+    unsafe = Patch(edits=(FileEdit(path="../outside.py", old="a", new="b"),))
+    with pytest.raises(InvalidPatchError):
+        service.run_tests("python -m pytest", patch=unsafe)
+    assert provider.created == []
+
+
+def test_run_without_patch_reports_none() -> None:
+    service, _, _ = build(FakeRunner(0))
+    assert service.run_tests("python -m pytest").patch is None

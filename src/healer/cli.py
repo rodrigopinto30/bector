@@ -11,6 +11,8 @@ from healer.adapters.log_reader import read_log
 from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
+from healer.domain.execution import RunReport
+from healer.domain.patch import parse_patch
 from healer.domain.redaction import Redactor
 from healer.factory import build_code_index, build_diagnoser, build_sandbox_runner
 
@@ -206,6 +208,62 @@ def test_command(
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    _report_run(report, show_output=show_output, as_json=as_json)
+
+
+@app.command()
+def patch(
+    patch_file: Annotated[
+        Path, typer.Argument(help="JSON patch with search-and-replace edits; '-' reads stdin")
+    ],
+    command: Annotated[
+        str | None,
+        typer.Argument(help="Test command; defaults to TEST_COMMAND ('python -m pytest')"),
+    ] = None,
+    path: WorkspaceOption = Path("."),
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", min=1, help="Seconds before the run is killed")
+    ] = None,
+    show_output: Annotated[
+        bool, typer.Option("--output", help="Also print the captured test output")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON")] = False,
+) -> None:
+    """Apply a patch to an isolated copy, show the diff and run the tests against it.
+
+    The real workspace is never modified.
+    """
+    settings = Settings()
+    try:
+        proposal = parse_patch(read_log(None if str(patch_file) == "-" else patch_file))
+        runner = build_sandbox_runner(path, settings, timeout_seconds=timeout)
+        report = runner.run_tests(command or settings.test_command, patch=proposal)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    applied = report.patch
+    if applied is not None and not as_json:
+        created = f", {len(applied.created)} new" if applied.created else ""
+        typer.echo(
+            f"patch      {_plural(len(proposal.edits), 'edit')} in "
+            f"{_plural(len(applied.files), 'file')}{created} "
+            f"(+{applied.lines_added} -{applied.lines_removed}), applied to the copy only"
+        )
+        if proposal.description:
+            typer.echo(f"purpose    {proposal.description}")
+        typer.echo("")
+        typer.echo(applied.diff.rstrip())
+        typer.echo("")
+    _report_run(report, show_output=show_output, as_json=as_json, verdict=True)
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _report_run(
+    report: RunReport, *, show_output: bool, as_json: bool, verdict: bool = False
+) -> None:
     result = report.result
     if as_json:
         typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
@@ -223,6 +281,9 @@ def test_command(
     if show_output:
         typer.echo("")
         typer.echo(result.output.rstrip())
+    if verdict:
+        outcome = "the tests pass with this patch" if result.passed else "the tests still fail"
+        typer.echo(f"verdict    {outcome}")
     typer.echo("")
     for number, diagnosis in enumerate(report.diagnoses, start=1):
         _print_diagnosis(number, diagnosis)
