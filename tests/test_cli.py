@@ -185,3 +185,66 @@ def test_redact_command_without_secrets() -> None:
     assert result.exit_code == 0
     assert "nothing to hide" in result.stdout
     assert "no secrets found" in result.output
+
+
+FIX_PATCH = json.dumps(
+    {
+        "description": "Use a default when the db key is missing",
+        "edits": [
+            {
+                "path": "app/cfg.py",
+                "old": '    return config["db"]',
+                "new": '    return config.get("db")',
+            },
+            {
+                "path": "tests/test_app.py",
+                "old": 'assert parse_port("2") == 3',
+                "new": 'assert parse_port("2") == 2',
+            },
+        ],
+    }
+)
+
+
+@pytest.mark.integration
+def test_patch_command_fixes_the_tests_in_the_copy_only(sample: Path) -> None:
+    (sample / "tests" / "test_collect.py").unlink()
+    original = (sample / "app" / "cfg.py").read_text()
+    result = runner.invoke(
+        cli.app,
+        ["patch", "-", "python -m pytest tests/test_app.py", "--path", str(sample)],
+        input=FIX_PATCH,
+    )
+    assert result.exit_code == 0
+    assert "patch      2 edits in 2 files (+2 -2), applied to the copy only" in result.stdout
+    assert '+    return config.get("db")' in result.stdout
+    assert "verdict    the tests pass with this patch" in result.stdout
+    assert (sample / "app" / "cfg.py").read_text() == original
+
+
+@pytest.mark.integration
+def test_patch_command_reports_tests_that_still_fail(sample: Path) -> None:
+    partial_fix = json.dumps({"edits": json.loads(FIX_PATCH)["edits"][:1]})
+    result = runner.invoke(
+        cli.app,
+        ["patch", "-", "python -m pytest tests/test_app.py", "--path", str(sample), "--json"],
+        input=partial_fix,
+    )
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert report["patch"]["files"] == ["app/cfg.py"]
+    assert [d["error"]["error_type"] for d in report["diagnoses"]] == ["AssertionError"]
+
+
+@pytest.mark.parametrize(
+    ("patch_text", "message"),
+    [
+        ('{"edits": [{"path": "../x.py", "old": "a", "new": "b"}]}', "outside the project"),
+        ('{"edits": [{"path": "app/cfg.py", "old": "nope", "new": "b"}]}', "not found"),
+        ("not json", "Invalid patch"),
+    ],
+)
+def test_patch_command_rejects_bad_patches(sample: Path, patch_text: str, message: str) -> None:
+    result = runner.invoke(cli.app, ["patch", "-", "--path", str(sample)], input=patch_text)
+    assert result.exit_code == 2
+    assert message in result.output

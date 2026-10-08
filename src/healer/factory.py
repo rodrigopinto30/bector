@@ -8,6 +8,7 @@ import chromadb
 from chromadb.api.types import EmbeddingFunction
 
 from healer.adapters.chroma_repository import ChromaSymbolRepository
+from healer.adapters.filesystem_patcher import FilesystemPatcher
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.subprocess_runner import SubprocessRunner
@@ -16,6 +17,7 @@ from healer.adapters.workspace_paths import WorkspacePathResolver
 from healer.adapters.workspace_scanner import WorkspaceScanner
 from healer.config import Settings
 from healer.domain.execution import CommandPolicy
+from healer.domain.patch import PatchPolicy
 from healer.services.code_index import CodeIndex
 from healer.services.diagnoser import Diagnoser
 from healer.services.sandbox_runner import SandboxRunner
@@ -61,4 +63,8 @@ def build_sandbox_runner(
     )
     policy = CommandPolicy(settings.allowed_test_commands)
     diagnoser = build_diagnoser(workspace, settings, embedding_function)
-    return SandboxRunner(provider, runner, policy, diagnoser)
+    applier = FilesystemPatcher(max_changed_lines=settings.max_patch_changed_lines)
+    patch_policy = PatchPolicy(
+        max_files=settings.max_patch_files, max_bytes=settings.max_patch_bytes
+    )
+    return SandboxRunner(provider, runner, policy, diagnoser, applier, patch_policy)
