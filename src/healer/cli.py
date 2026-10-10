@@ -12,9 +12,15 @@ from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
 from healer.domain.execution import RunReport
-from healer.domain.patch import parse_patch
+from healer.domain.patch import AppliedPatch, Patch, parse_patch
+from healer.domain.proposal import SYSTEM_PROMPT, render_request
 from healer.domain.redaction import Redactor
-from healer.factory import build_code_index, build_diagnoser, build_sandbox_runner
+from healer.factory import (
+    build_code_index,
+    build_diagnoser,
+    build_fix_proposer,
+    build_sandbox_runner,
+)
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
 
@@ -241,20 +247,124 @@ def patch(
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
-    applied = report.patch
-    if applied is not None and not as_json:
-        created = f", {len(applied.created)} new" if applied.created else ""
-        typer.echo(
-            f"patch      {_plural(len(proposal.edits), 'edit')} in "
-            f"{_plural(len(applied.files), 'file')}{created} "
-            f"(+{applied.lines_added} -{applied.lines_removed}), applied to the copy only"
-        )
-        if proposal.description:
-            typer.echo(f"purpose    {proposal.description}")
-        typer.echo("")
-        typer.echo(applied.diff.rstrip())
-        typer.echo("")
+    if not as_json:
+        _print_applied(proposal, report.patch, show_purpose=True)
     _report_run(report, show_output=show_output, as_json=as_json, verdict=True)
+
+
+@app.command()
+def propose(
+    log: Annotated[
+        Path | None, typer.Argument(help="Log file with the failure; reads stdin when omitted")
+    ] = None,
+    command: Annotated[
+        str | None,
+        typer.Option("--command", "-c", help="Test command used to validate the proposal"),
+    ] = None,
+    path: WorkspaceOption = Path("."),
+    error_number: Annotated[
+        int, typer.Option("--error", "-e", min=1, help="Which diagnosed error to fix")
+    ] = 1,
+    run_tests: Annotated[
+        bool, typer.Option("--test/--no-test", help="Validate the proposal in a sandbox")
+    ] = True,
+    save: Annotated[
+        Path | None, typer.Option("--save", help="Write the proposed patch as JSON to this file")
+    ] = None,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", min=1, help="Seconds before the run is killed")
+    ] = None,
+    show_output: Annotated[
+        bool, typer.Option("--output", help="Also print the captured test output")
+    ] = False,
+    show_prompt: Annotated[
+        bool,
+        typer.Option("--show-prompt", help="Print what would be sent to Claude and stop"),
+    ] = False,
+) -> None:
+    """Ask Claude for a patch that fixes an error from the log, then test it on a copy.
+
+    Only the diagnosis and the related functions are sent, after hiding secrets. The real
+    workspace is never modified.
+    """
+    settings = Settings()
+    try:
+        text = read_log(None if log is None or str(log) == "-" else log)
+        code_index = build_code_index(path, settings)
+        code_index.index()
+        diagnoses = build_diagnoser(path, settings).diagnose(text)
+        if not diagnoses:
+            typer.echo("no errors found in the log", err=True)
+            raise typer.Exit(code=1)
+        if error_number > len(diagnoses):
+            typer.echo(f"error: the log has only {_plural(len(diagnoses), 'error')}", err=True)
+            raise typer.Exit(code=2)
+        diagnosis = diagnoses[error_number - 1]
+        typer.echo(f"error      {diagnosis.error.summary}")
+        proposer = build_fix_proposer(path, settings, code_index=code_index)
+        if show_prompt:
+            request, counts = proposer.prepare(diagnosis)
+            typer.echo(f"secrets    {sum(counts.values())} hidden before sending")
+            typer.echo("")
+            typer.echo("----- system -----")
+            typer.echo(SYSTEM_PROMPT)
+            typer.echo("----- user -----")
+            typer.echo(render_request(request))
+            return
+        proposal = proposer.propose(diagnosis)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    labels = ", ".join(f"{c.file}:{c.label}" for c in proposal.context)
+    hidden = sum(proposal.redactions.values())
+    typer.echo(f"context    {_plural(len(proposal.context), 'snippet')} sent ({labels})")
+    typer.echo(f"secrets    {hidden} hidden before sending")
+    usage = proposal.usage
+    cached = f" ({usage.cache_read_tokens} from cache)" if usage.cache_read_tokens else ""
+    typer.echo(
+        f"model      {proposal.model}, {usage.input_total} tokens in{cached}, "
+        f"{usage.output_tokens} out"
+    )
+    typer.echo(f"proposal   {proposal.explanation}")
+    typer.echo("")
+    if save is not None:
+        save.write_text(proposal.patch.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        typer.echo(f"saved      {save} (apply it to a copy with 'healer patch {save}')")
+        typer.echo("")
+    if not run_tests:
+        for edit in proposal.patch.edits:
+            typer.echo(f"--- {edit.path}" if edit.old else f"+++ {edit.path} (new file)")
+            for line in edit.old.splitlines():
+                typer.echo(f"- {line}")
+            for line in edit.new.splitlines():
+                typer.echo(f"+ {line}")
+            typer.echo("")
+        return
+    try:
+        runner = build_sandbox_runner(path, settings, timeout_seconds=timeout)
+        report = runner.run_tests(command or settings.test_command, patch=proposal.patch)
+    except HealerError as exc:
+        typer.echo(f"error: the proposal could not be tested: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    _print_applied(proposal.patch, report.patch, show_purpose=False)
+    _report_run(report, show_output=show_output, as_json=False, verdict=True)
+
+
+def _print_applied(patch: Patch, applied: AppliedPatch | None, *, show_purpose: bool) -> None:
+    if applied is None:
+        return
+    created = f", {len(applied.created)} new" if applied.created else ""
+    typer.echo(
+        f"patch      {_plural(len(patch.edits), 'edit')} in "
+        f"{_plural(len(applied.files), 'file')}{created} "
+        f"(+{applied.lines_added} -{applied.lines_removed}), applied to the copy only"
+    )
+    if show_purpose and patch.description:
+        typer.echo(f"purpose    {patch.description}")
+    typer.echo("")
+    typer.echo(applied.diff.rstrip())
+    typer.echo("")
 
 
 def _plural(count: int, noun: str) -> str:
