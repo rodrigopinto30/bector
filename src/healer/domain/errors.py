@@ -35,3 +35,11 @@ class InvalidPatchError(HealerError):
 
 class PatchConflictError(HealerError):
     """A patch does not fit the current code: the text to replace is missing or ambiguous."""
+
+
+class LLMError(HealerError):
+    """The language model could not produce a usable proposal."""
+
+
+class MissingContextError(HealerError):
+    """There is no indexed project code related to the error to show the model."""

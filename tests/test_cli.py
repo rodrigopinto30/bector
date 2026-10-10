@@ -8,7 +8,14 @@ from typer.testing import CliRunner
 
 from healer import cli
 from healer.config import Settings
-from healer.factory import build_code_index, build_diagnoser, build_sandbox_runner
+from healer.domain.patch import FileEdit, Patch, parse_patch
+from healer.domain.proposal import Proposal, TokenUsage
+from healer.factory import (
+    build_code_index,
+    build_diagnoser,
+    build_fix_proposer,
+    build_sandbox_runner,
+)
 from tests.conftest import FakeEmbeddingFunction
 
 runner = CliRunner()
@@ -248,3 +255,117 @@ def test_patch_command_rejects_bad_patches(sample: Path, patch_text: str, messag
     result = runner.invoke(cli.app, ["patch", "-", "--path", str(sample)], input=patch_text)
     assert result.exit_code == 2
     assert message in result.output
+
+
+class FakeLLM:
+    """Stands in for Claude: proposes the read_db fix for the sample project."""
+
+    def __init__(self, fix_test: bool = False) -> None:
+        self.prompts: list[str] = []
+        self.fix_test = fix_test
+
+    def propose(self, system: str, prompt: str) -> Proposal:
+        self.prompts.append(prompt)
+        edits = [
+            FileEdit(
+                path="app/cfg.py", old='    return config["db"]', new='    return config.get("db")'
+            )
+        ]
+        if self.fix_test:
+            edits.append(
+                FileEdit(
+                    path="tests/test_app.py", old='parse_port("2") == 3', new='parse_port("2") == 2'
+                )
+            )
+        return Proposal(
+            patch=Patch(edits=tuple(edits), description="Use a default for db."),
+            explanation="Use a default for db.",
+            model="claude-sonnet-5-5",
+            usage=TokenUsage(input_tokens=600, output_tokens=120, cache_write_tokens=300),
+        )
+
+
+@pytest.fixture
+def fake_llm(sample: Path, monkeypatch: pytest.MonkeyPatch) -> FakeLLM:
+    (sample / "tests" / "test_collect.py").unlink()
+    llm = FakeLLM(fix_test=True)
+    monkeypatch.setattr(
+        cli,
+        "build_fix_proposer",
+        partial(build_fix_proposer, embedding_function=FakeEmbeddingFunction(), llm=llm),
+    )
+    return llm
+
+
+@pytest.mark.integration
+def test_propose_command_asks_for_a_fix_and_validates_it(sample: Path, fake_llm: FakeLLM) -> None:
+    original = (sample / "app" / "cfg.py").read_text()
+    log = (TRACES / "pytest_long.txt").read_text()
+    result = runner.invoke(
+        cli.app,
+        ["propose", "--path", str(sample), "--command", "python -m pytest tests/test_app.py"],
+        input=log,
+    )
+    assert result.exit_code == 0, result.output
+    assert "error      KeyError: 'db'" in result.stdout
+    assert "context    " in result.stdout and "app/cfg.py:read_db" in result.stdout
+    assert "model      claude-sonnet-5-5, 900 tokens in, 120 out" in result.stdout
+    assert '+    return config.get("db")' in result.stdout
+    assert "verdict    the tests pass with this patch" in result.stdout
+    assert 'symbol="read_db"' in fake_llm.prompts[0]
+    assert (sample / "app" / "cfg.py").read_text() == original
+
+
+@pytest.mark.integration
+def test_propose_without_tests_shows_the_edits_and_saves_them(
+    sample: Path, fake_llm: FakeLLM, tmp_path: Path
+) -> None:
+    target = tmp_path / "fix.json"
+    result = runner.invoke(
+        cli.app,
+        ["propose", "--path", str(sample), "--no-test", "--save", str(target)],
+        input=(TRACES / "script_key.txt").read_text(),
+    )
+    assert result.exit_code == 0, result.output
+    assert '+     return config.get("db")' in result.stdout
+    assert "verdict" not in result.stdout
+    saved = parse_patch(target.read_text())
+    assert saved.edits[0].path == "app/cfg.py"
+
+
+def test_propose_without_an_api_key_explains_what_to_do(
+    sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    result = runner.invoke(
+        cli.app, ["propose", "--path", str(sample)], input=(TRACES / "script_key.txt").read_text()
+    )
+    assert result.exit_code == 2
+    assert "ANTHROPIC_API_KEY is not set" in result.output
+
+
+def test_propose_with_a_log_without_errors(sample: Path, fake_llm: FakeLLM) -> None:
+    result = runner.invoke(cli.app, ["propose", "--path", str(sample)], input="3 passed\n")
+    assert result.exit_code == 1
+    assert "no errors found" in result.output
+    assert fake_llm.prompts == []
+
+
+@pytest.mark.integration
+def test_propose_show_prompt_needs_no_api_key(
+    sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    secret = "AKIA" + "IOSFODNN7EXAMPLE"
+    (sample / "app" / "cfg.py").write_text(
+        f'KEY = "{secret}"\n\n\ndef read_db(config):\n    return config["db"]\n'
+    )
+    result = runner.invoke(
+        cli.app,
+        ["propose", "--path", str(sample), "--show-prompt"],
+        input=(TRACES / "script_key.txt").read_text().replace("line 2,", "line 5,"),
+    )
+    assert result.exit_code == 0, result.output
+    assert "----- system -----" in result.stdout
+    assert '<code path="app/cfg.py"' in result.stdout
+    assert secret not in result.stdout

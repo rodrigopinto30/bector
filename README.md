@@ -173,6 +173,37 @@ verdict    the tests pass with this patch
 - **Limits.** At most `MAX_PATCH_FILES` files (default 5), `MAX_PATCH_BYTES` of edit text (default 100 KB) and `MAX_PATCH_CHANGED_LINES` changed lines (default 300).
 - **Exit codes:** `0` when the tests pass with the patch, `1` when they still fail (the failures are diagnosed), `2` when the patch is invalid or does not fit the code.
 
+## Proposals: ask Claude for a fix
+
+`healer propose` reads a failure log, diagnoses it, sends Claude the smallest useful context, and tests the proposed patch on an isolated copy. Your files are never modified. It needs `ANTHROPIC_API_KEY` in `.env` (recreate the container after editing it, for example with `./stop.sh && ./start.sh`).
+
+```bash
+docker compose exec healer sh -c 'python -m pytest > error.log 2>&1'
+docker compose exec healer healer propose error.log --show-prompt  
+docker compose exec healer healer propose error.log                 # ask Claude and test the patch
+docker compose exec healer healer propose error.log --no-test --save fix.json
+```
+
+```text
+error      KeyError: 'db'
+context    2 snippets sent (app/cfg.py:read_db, tests/test_app.py:test_read_db)
+secrets    1 hidden before sending
+model      claude-sonnet-5-5, 1180 tokens in, 240 out
+proposal   read_db raises KeyError when the key is missing; return a default instead.
+...
+verdict    the tests pass with this patch
+```
+
+- **Context, not files.** Claude receives the diagnosis plus a few functions: the one where the error originates, the functions of the call stack that led to it, and up to four more found by meaning when they are close enough (`CONTEXT_MAX_DISTANCE`, default 0.7), within `CONTEXT_MAX_CHARS` (default 12,000 characters). The index is refreshed first.
+- **Secrets are hidden before sending,** and a proposal that would write a `[REDACTED:...]` marker into the code is rejected.
+- **Project content is data.** The diagnosis and the code are wrapped in tags, and the system prompt tells the model to ignore any instruction inside them.
+- **Structured output.** The answer is constrained to the patch format (explanation plus search-and-replace edits), so it is always valid.
+- **Model and limits:** `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `ANTHROPIC_EFFORT` (default `high`), `ANTHROPIC_MAX_TOKENS` (16,000), `ANTHROPIC_TIMEOUT_SECONDS` (120) and `ANTHROPIC_MAX_RETRIES` (2; the SDK retries rate limits, overloads and network errors with backoff). Server-side refusal fallbacks are enabled.
+- `--error N` picks which diagnosed error to fix, `--command` sets the test command, `--save` writes the patch so it can be replayed with `healer patch`.
+- **Exit codes:** `0` when a proposal was produced (and passes the tests when tested), `1` when the log has no errors or the tests still fail, `2` on configuration, API or patch errors.
+
+Automated tests never call the real API; they use a fake model.
+
 ## Redaction: hide secrets before anything leaves the machine
 
 `healer redact` prints a file (or stdin) with every credential replaced by a `[REDACTED:<kind>]` placeholder, and reports on stderr how many were hidden. The file itself is never modified. The same redactor runs on every diagnosis before it is sent to Claude (Phase 4) or published to other nodes (Phase 5).

@@ -8,6 +8,7 @@ from healer.domain.diagnosis import TracedError
 from healer.domain.execution import RunResult
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
+from healer.domain.proposal import Proposal
 
 
 class SourceScanner(Protocol):
@@ -91,4 +92,16 @@ class CommandRunner(Protocol):
 class PatchApplier(Protocol):
     def apply(self, patch: Patch, root: Path) -> AppliedPatch:
         """Apply every edit under ``root`` or none of them."""
+        ...
+
+
+class SymbolSearch(Protocol):
+    def search(self, query: str, limit: int) -> list[SearchHit]: ...
+
+
+class PatchProposer(Protocol):
+    """A language model that answers a fix request with a patch."""
+
+    def propose(self, system: str, prompt: str) -> Proposal:
+        """Return the proposal; raise ``LLMError`` when the model gives no usable answer."""
         ...
