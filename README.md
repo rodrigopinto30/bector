@@ -142,7 +142,7 @@ result     tests failed (exit 1) in 1.3s
 
 ## Patches: apply a change to the copy and test it
 
-`healer patch` applies a patch to an isolated copy of the workspace, prints the diff, and runs the tests against it. It answers "does this change fix the tests?" without touching your files. In Phase 4 the patches will come from Claude; for now they are written by hand.
+`healer patch` applies a patch to an isolated copy of the workspace, prints the diff, and runs the tests against it. It answers "does this change fix the tests?" without touching your files. Patches can be written by hand or produced by `healer propose --save`.
 
 A patch is a JSON list of search-and-replace edits:
 
@@ -203,6 +203,45 @@ verdict    the tests pass with this patch
 - **Exit codes:** `0` when a proposal was produced (and passes the tests when tested), `1` when the log has no errors or the tests still fail, `2` on configuration, API or patch errors.
 
 Automated tests never call the real API; they use a fake model.
+
+## Self-correction loop: fix until the tests pass
+
+`healer run` runs the tests on an isolated copy and, when they fail, asks Claude for a patch, tests it on a fresh copy and, if the tests still fail, tells Claude what went wrong and asks again. It stops as soon as a patch makes the tests pass, or when it reaches the attempt or token limit. Your files are never modified: the working patch is shown so you can review it and apply it yourself. It needs `ANTHROPIC_API_KEY`, like `healer propose`.
+
+```bash
+docker compose exec healer healer run                                   # runs TEST_COMMAND (python -m pytest)
+docker compose exec healer healer run "python -m pytest tests/test_app.py" --attempts 5
+docker compose exec healer healer run --save fix.json                   # keep the patch that worked
+```
+
+```text
+tests      tests failed (exit 1) in 1.3s, on an isolated copy
+error      KeyError: 'db'  (app/cfg.py:3)
+limits     3 attempts, 100000 tokens
+
+attempt 1  claude-sonnet-5-5, 1162 tokens in, 142 out
+proposal   ... Using config.get with a default of "postgres" fixes the root cause.
+patch      1 file (+1 -1)
+result     the tests still fail: IndexError: list index out of range
+
+attempt 2  claude-sonnet-5-5, 1356 tokens in (870 from cache), 246 out
+proposal   The first patch fixed read_db ..., but the test then calls parse_port with "localhost" ...
+patch      2 files (+3 -2)
+result     the tests pass
+
+verdict    fixed: the tests pass with the patch of attempt 2
+spent      2 attempts, 2518 tokens in (870 from cache), 388 out
+...
+```
+
+- **The loop is a LangGraph state graph** (`src/healer/pipeline/`): `reproduce` runs the tests without a patch, `propose` asks Claude, `test` tries the patch, and the graph goes back to `propose` until it is done.
+- **Every patch starts from the original code,** not from an earlier attempt, so a bad attempt never piles up. Claude is told this and returns the complete fix each time.
+- **Feedback.** Each new request includes the earlier patches and what happened with them: the errors that remained (at most three, with their location), the end of the output when no error was recognised, or why the patch could not be applied. It also adds the functions where the last patch broke, in files that patch did not touch. Everything is redacted, as in `healer propose`.
+- **Goal:** the whole test command passes, not only the targeted error. Use a narrower command (`python -m pytest tests/test_app.py::test_x`) to focus on one test.
+- **Limits** (7.6 of the plan): at most `REPAIR_MAX_ATTEMPTS` patches (default 3; `--attempts` overrides it) and `REPAIR_MAX_TOKENS` per run (default 100,000). The token check is made before each new attempt, assuming it will cost about as much as the last one.
+- **Wasted attempts are cheap:** a patch identical to an earlier one is not tested again, and a patch that does not fit the code is reported back to Claude without running the tests. Both still count as attempts.
+- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be replayed with `healer patch`.
+- **Exit codes:** `0` when the tests pass (already or with the patch), `1` when no patch fixed them or the failure could not be diagnosed, `2` on configuration, API or command errors.
 
 ## Redaction: hide secrets before anything leaves the machine
 
