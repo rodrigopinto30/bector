@@ -24,6 +24,7 @@ from healer.domain.patch import PatchPolicy
 from healer.domain.ports import PatchProposer
 from healer.domain.proposal import Proposal
 from healer.domain.redaction import Redactor
+from healer.pipeline.repair import RepairPipeline
 from healer.services.code_index import CodeIndex
 from healer.services.diagnoser import Diagnoser
 from healer.services.fix_proposer import FixProposer
@@ -110,6 +111,30 @@ def build_fix_proposer(
         Redactor(),
         max_context_chars=settings.context_max_chars,
         max_distance=settings.context_max_distance,
+    )
+
+
+def build_repair_pipeline(
+    workspace: Path,
+    settings: Settings,
+    embedding_function: EmbeddingFunction[Any] | None = None,
+    *,
+    code_index: CodeIndex | None = None,
+    llm: PatchProposer | None = None,
+    timeout_seconds: float | None = None,
+    max_attempts: int | None = None,
+) -> RepairPipeline:
+    runner = build_sandbox_runner(
+        workspace, settings, embedding_function, timeout_seconds=timeout_seconds
+    )
+    proposer = build_fix_proposer(
+        workspace, settings, embedding_function, code_index=code_index, llm=llm
+    )
+    return RepairPipeline(
+        runner,
+        proposer,
+        max_attempts=max_attempts or settings.repair_max_attempts,
+        max_tokens=settings.repair_max_tokens,
     )
 
 

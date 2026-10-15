@@ -1,5 +1,10 @@
 """Project exception hierarchy. Catch ``HealerError`` at the CLI boundary only."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from healer.domain.proposal import Proposal
+
 
 class HealerError(Exception):
     """Base class for every error raised on purpose by this project."""
@@ -31,6 +36,14 @@ class SandboxError(HealerError):
 
 class InvalidPatchError(HealerError):
     """A patch breaks the rules: unsafe path, too large, or not text."""
+
+
+class RejectedProposalError(InvalidPatchError):
+    """The model answered, but its patch cannot be used. Keeps the proposal to count its cost."""
+
+    def __init__(self, message: str, proposal: "Proposal") -> None:
+        super().__init__(message)
+        self.proposal = proposal
 
 
 class PatchConflictError(HealerError):

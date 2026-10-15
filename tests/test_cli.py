@@ -14,6 +14,7 @@ from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
+    build_repair_pipeline,
     build_sandbox_runner,
 )
 from tests.conftest import FakeEmbeddingFunction
@@ -369,3 +370,80 @@ def test_propose_show_prompt_needs_no_api_key(
     assert "----- system -----" in result.stdout
     assert '<code path="app/cfg.py"' in result.stdout
     assert secret not in result.stdout
+
+
+class ScriptedLLM:
+    """Stands in for Claude in the loop: a partial fix first, the complete one next."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def propose(self, system: str, prompt: str) -> Proposal:
+        self.prompts.append(prompt)
+        return FakeLLM(fix_test=len(self.prompts) > 1).propose(system, prompt)
+
+
+@pytest.fixture
+def scripted_llm(sample: Path, monkeypatch: pytest.MonkeyPatch) -> ScriptedLLM:
+    (sample / "tests" / "test_collect.py").unlink()
+    llm = ScriptedLLM()
+    monkeypatch.setattr(
+        cli,
+        "build_repair_pipeline",
+        partial(build_repair_pipeline, embedding_function=FakeEmbeddingFunction(), llm=llm),
+    )
+    return llm
+
+
+@pytest.mark.integration
+def test_run_retries_with_feedback_until_the_tests_pass(
+    sample: Path, scripted_llm: ScriptedLLM, tmp_path: Path
+) -> None:
+    original = (sample / "app" / "cfg.py").read_text()
+    target = tmp_path / "fix.json"
+    result = runner.invoke(
+        cli.app,
+        ["run", "python -m pytest tests/test_app.py", "--path", str(sample), "--save", str(target)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "error      KeyError: 'db'  (app/cfg.py:2)" in result.stdout
+    assert "limits     3 attempts, 100000 tokens" in result.stdout
+    assert "result     the tests still fail: AssertionError: assert 2 == 3" in result.stdout
+    assert "verdict    fixed: the tests pass with the patch of attempt 2" in result.stdout
+    assert "spent      2 attempts, 1800 tokens in, 240 out" in result.stdout
+    assert '+    return config.get("db")' in result.stdout
+    assert "AssertionError: assert 2 == 3" in scripted_llm.prompts[1]
+    assert len(parse_patch(target.read_text()).edits) == 2
+    assert (sample / "app" / "cfg.py").read_text() == original
+
+
+@pytest.mark.integration
+def test_run_stops_at_the_attempt_limit(sample: Path, scripted_llm: ScriptedLLM) -> None:
+    result = runner.invoke(
+        cli.app,
+        ["run", "python -m pytest tests/test_app.py", "--path", str(sample), "--attempts", "1"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "verdict    not fixed: no patch made the tests pass in 1 attempt" in result.stdout
+    assert len(scripted_llm.prompts) == 1
+
+
+@pytest.mark.integration
+def test_run_with_passing_tests_does_not_call_the_model(
+    sample: Path, scripted_llm: ScriptedLLM
+) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "python -m pytest tests/test_app.py::test_ok", "--path", str(sample)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "nothing to fix" in result.stdout
+    assert scripted_llm.prompts == []
+
+
+def test_run_rejects_commands_outside_the_allowlist(
+    sample: Path, scripted_llm: ScriptedLLM
+) -> None:
+    result = runner.invoke(cli.app, ["run", "rm -rf /", "--path", str(sample)])
+    assert result.exit_code == 2
+    assert "Command not allowed" in result.output
+    assert scripted_llm.prompts == []

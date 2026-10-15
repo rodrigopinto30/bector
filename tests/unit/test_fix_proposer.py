@@ -1,11 +1,13 @@
 import pytest
 
 from healer.domain.diagnosis import Diagnosis, StackFrame, TracedError
-from healer.domain.errors import InvalidPatchError, MissingContextError
+from healer.domain.errors import InvalidPatchError, MissingContextError, RejectedProposalError
+from healer.domain.execution import RunReport, RunResult
 from healer.domain.models import SearchHit, Symbol, SymbolKind
-from healer.domain.patch import FileEdit, Patch
+from healer.domain.patch import AppliedPatch, FileEdit, Patch
 from healer.domain.proposal import SYSTEM_PROMPT, Proposal, TokenUsage
 from healer.domain.redaction import Redactor
+from healer.domain.repair import Attempt, AttemptOutcome
 from healer.services.fix_proposer import FixProposer
 
 AWS = "AKIA" + "IOSFODNN7EXAMPLE"
@@ -206,3 +208,61 @@ def test_a_secret_in_the_enclosing_function_is_counted_once() -> None:
     proposal = proposer.propose(secret_password)
     assert proposal.redactions == {"secret_assignment": 1}
     assert "hunter2" not in llm.calls[0][1]
+
+
+def failed_attempt(edits: tuple[FileEdit, ...], *failures: Diagnosis) -> Attempt:
+    patch = Patch(edits=edits)
+    return Attempt(
+        number=1,
+        proposal=FakeLLM(edits).propose("", ""),
+        outcome=AttemptOutcome.FAILED,
+        report=RunReport(
+            result=RunResult(command=("pytest",), exit_code=1, output="", duration_seconds=0.1),
+            files_copied=2,
+            diagnoses=failures,
+            patch=AppliedPatch(files=patch.files, diff="", lines_added=1, lines_removed=1),
+        ),
+    )
+
+
+def test_previous_attempts_are_sent_redacted_with_their_result() -> None:
+    edits = (FileEdit(path="app/cfg.py", old='config["db"]', new=f'config.get("db", "{AWS}")'),)
+    proposer, _, llm = build([])
+    proposal = proposer.propose(DIAGNOSIS, [failed_attempt(edits, DIAGNOSIS)])
+    _, prompt = llm.calls[0]
+    assert '<previous_attempt number="1">' in prompt
+    assert "edit app/cfg.py:" in prompt
+    assert "The tests still fail after applying the patch:" in prompt
+    assert AWS not in prompt and "[REDACTED:aws_access_key]" in prompt
+    assert proposal.redactions == {"aws_access_key": 1}
+    assert "<previous_attempt>" in SYSTEM_PROMPT
+
+
+def test_code_where_the_last_attempt_broke_is_added_to_the_context() -> None:
+    connect_frame = StackFrame(
+        file="app/db.py", line=2, function="connect", workspace_file="app/db.py"
+    )
+    in_patched_file = StackFrame(
+        file="app/cfg.py", line=7, function="parse_port", workspace_file="app/cfg.py"
+    )
+    broke = Diagnosis(
+        error=TracedError(
+            error_type="TypeError", message="x", frames=(connect_frame, in_patched_file)
+        ),
+        origin=in_patched_file,
+        signature="t" * 64,
+        signature_basis="TypeError",
+    )
+    edits = (FileEdit(path="app/cfg.py", old="a", new="b"),)
+    proposer, _, _ = build([], stack=[READ_DB, PARSE_PORT, CONNECT])
+    proposal = proposer.propose(DIAGNOSIS, [failed_attempt(edits, broke)])
+    assert [c.label for c in proposal.context] == ["read_db", "connect"]
+
+
+def test_a_rejected_proposal_keeps_the_answer_and_its_cost() -> None:
+    llm = FakeLLM((FileEdit(path="app/db.py", old="key = 1", new="key = [REDACTED:password]"),))
+    proposer, _, _ = build([CONNECT], llm=llm)
+    with pytest.raises(RejectedProposalError) as caught:
+        proposer.propose(DIAGNOSIS)
+    assert caught.value.proposal.usage.total == 15
+    assert [c.label for c in caught.value.proposal.context] == ["read_db", "connect"]
