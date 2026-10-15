@@ -1,17 +1,22 @@
 """Use case: turn a diagnosis into a patch proposal with the smallest useful context."""
 
+from collections.abc import Sequence
+
 from healer.domain.diagnosis import Diagnosis
-from healer.domain.errors import InvalidPatchError, MissingContextError
+from healer.domain.errors import MissingContextError, RejectedProposalError
 from healer.domain.models import Symbol, SymbolKind
+from healer.domain.patch import FileEdit, Patch
 from healer.domain.ports import PatchProposer, SymbolLocator, SymbolSearch
 from healer.domain.proposal import (
     SYSTEM_PROMPT,
     ContextSnippet,
     FixRequest,
+    PreviousAttempt,
     Proposal,
     render_request,
 )
 from healer.domain.redaction import PLACEHOLDER, Redactor
+from healer.domain.repair import Attempt
 
 _MARKER = PLACEHOLDER.split("{", 1)[0]
 
@@ -20,9 +25,10 @@ class FixProposer:
     """Sends the model a few functions, never whole files.
 
     In order: the function where the error originates, the functions of the call stack
-    that led to it (closest first), and code found by meaning that is close enough to
-    the error. Everything is redacted first. A proposal that writes a redaction marker
-    into the code is rejected, because applying it would replace a real value with it.
+    that led to it (closest first), the functions where the last failed attempt broke,
+    and code found by meaning that is close enough to the error. Everything is redacted
+    first. A proposal that writes a redaction marker into the code is rejected, because
+    applying it would replace a real value with it.
     """
 
     def __init__(
@@ -44,30 +50,56 @@ class FixProposer:
         self._max_related = max_related
         self._max_distance = max_distance
 
-    def prepare(self, diagnosis: Diagnosis) -> tuple[FixRequest, dict[str, int]]:
-        """Build the redacted request without calling the model, plus what was hidden."""
-        snippets, counts = self._context(diagnosis)
+    def prepare(
+        self, diagnosis: Diagnosis, history: Sequence[Attempt] = ()
+    ) -> tuple[FixRequest, dict[str, int]]:
+        """Build the redacted request without calling the model, plus what was hidden.
+
+        ``history`` holds the failed attempts at this error; the model sees each patch
+        and its result so it does not repeat them.
+        """
+        snippets, counts = self._context(diagnosis, history)
         if not snippets:
             raise MissingContextError(
                 "No indexed project code is related to this error; run 'healer index' first"
             )
         without_source = diagnosis.model_copy(update={"location": None})
         redacted, diagnosis_counts = self._redactor.redact_diagnosis(without_source)
-        for kind, n in diagnosis_counts.items():
-            counts[kind] = counts.get(kind, 0) + n
-        return FixRequest(diagnosis=redacted, snippets=tuple(snippets)), counts
+        _merge(counts, diagnosis_counts)
+        previous = tuple(self._previous(attempt, counts) for attempt in history)
+        request = FixRequest(diagnosis=redacted, snippets=tuple(snippets), previous=previous)
+        return request, counts
 
-    def propose(self, diagnosis: Diagnosis) -> Proposal:
-        request, counts = self.prepare(diagnosis)
+    def propose(self, diagnosis: Diagnosis, history: Sequence[Attempt] = ()) -> Proposal:
+        """Ask the model for a patch; raise ``RejectedProposalError`` if it cannot be used."""
+        request, counts = self.prepare(diagnosis, history)
         proposal = self._llm.propose(SYSTEM_PROMPT, render_request(request))
+        proposal = proposal.model_copy(update={"context": request.snippets, "redactions": counts})
         for edit in proposal.patch.edits:
             if _MARKER in edit.old or _MARKER in edit.new:
-                raise InvalidPatchError(
-                    f"{edit.path}: the proposal contains a redaction marker and cannot be applied"
+                raise RejectedProposalError(
+                    f"{edit.path}: the proposal contains a redaction marker and cannot be applied",
+                    proposal,
                 )
-        return proposal.model_copy(update={"context": request.snippets, "redactions": counts})
+        return proposal
 
-    def _context(self, diagnosis: Diagnosis) -> tuple[list[ContextSnippet], dict[str, int]]:
+    def _previous(self, attempt: Attempt, counts: dict[str, int]) -> PreviousAttempt:
+        def redact(text: str) -> str:
+            result = self._redactor.redact(text)
+            _merge(counts, result.counts)
+            return result.text
+
+        edits = tuple(
+            FileEdit(path=e.path, old=redact(e.old), new=redact(e.new))
+            for e in attempt.proposal.patch.edits
+        )
+        return PreviousAttempt(
+            number=attempt.number, patch=Patch(edits=edits), result=redact(attempt.feedback())
+        )
+
+    def _context(
+        self, diagnosis: Diagnosis, history: Sequence[Attempt]
+    ) -> tuple[list[ContextSnippet], dict[str, int]]:
         chosen: list[Symbol] = []
 
         def add(symbol: Symbol | None) -> bool:
@@ -82,6 +114,13 @@ class FixProposer:
         for frame in reversed(diagnosis.error.frames):
             if frame.workspace_file:
                 add(self._locator.enclosing_symbol(frame.workspace_file, frame.line))
+        last = history[-1] if history else None
+        if last is not None and last.report is not None:
+            patched = set(last.proposal.patch.files)
+            for failure in last.report.diagnoses:
+                for frame in reversed(failure.error.frames):
+                    if frame.workspace_file and frame.workspace_file not in patched:
+                        add(self._locator.enclosing_symbol(frame.workspace_file, frame.line))
 
         query = diagnosis.error.summary
         if diagnosis.origin is not None and diagnosis.origin.code:
@@ -100,8 +139,7 @@ class FixProposer:
             if snippets and used + len(symbol.source) > self._max_chars:
                 continue
             result = self._redactor.redact(symbol.source)
-            for kind, n in result.counts.items():
-                counts[kind] = counts.get(kind, 0) + n
+            _merge(counts, result.counts)
             snippets.append(
                 ContextSnippet(
                     file=symbol.file,
@@ -113,6 +151,11 @@ class FixProposer:
             )
             used += len(symbol.source)
         return snippets, counts
+
+
+def _merge(counts: dict[str, int], more: dict[str, int]) -> None:
+    for kind, n in more.items():
+        counts[kind] = counts.get(kind, 0) + n
 
 
 def _overlaps(a: Symbol, b: Symbol) -> bool:

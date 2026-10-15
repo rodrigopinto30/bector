@@ -13,12 +13,14 @@ from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
 from healer.domain.execution import RunReport
 from healer.domain.patch import AppliedPatch, Patch, parse_patch
-from healer.domain.proposal import SYSTEM_PROMPT, render_request
+from healer.domain.proposal import SYSTEM_PROMPT, TokenUsage, render_request
 from healer.domain.redaction import Redactor
+from healer.domain.repair import Attempt, AttemptOutcome, RepairResult, RepairStatus
 from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
+    build_repair_pipeline,
     build_sandbox_runner,
 )
 
@@ -53,13 +55,6 @@ def doctor() -> None:
     port = os.environ.get("MQTT_PORT", "1883")
     typer.echo(f"[info] MQTT broker: {host}:{port}")
     raise typer.Exit(code=1 if failed else 0)
-
-
-@app.command()
-def run(command: str = typer.Argument(..., help="Test command to run, e.g. 'pytest'")) -> None:
-    """Run a command and remediate failures (Phase 4)."""
-    typer.echo("Not implemented yet.")
-    raise typer.Exit(code=1)
 
 
 WorkspaceOption = Annotated[
@@ -320,12 +315,7 @@ def propose(
     hidden = sum(proposal.redactions.values())
     typer.echo(f"context    {_plural(len(proposal.context), 'snippet')} sent ({labels})")
     typer.echo(f"secrets    {hidden} hidden before sending")
-    usage = proposal.usage
-    cached = f" ({usage.cache_read_tokens} from cache)" if usage.cache_read_tokens else ""
-    typer.echo(
-        f"model      {proposal.model}, {usage.input_total} tokens in{cached}, "
-        f"{usage.output_tokens} out"
-    )
+    typer.echo(f"model      {proposal.model}, {_tokens(proposal.usage)}")
     typer.echo(f"proposal   {proposal.explanation}")
     typer.echo("")
     if save is not None:
@@ -349,6 +339,145 @@ def propose(
         raise typer.Exit(code=2) from exc
     _print_applied(proposal.patch, report.patch, show_purpose=False)
     _report_run(report, show_output=show_output, as_json=False, verdict=True)
+
+
+@app.command()
+def run(
+    command: Annotated[
+        str | None,
+        typer.Argument(help="Test command; defaults to TEST_COMMAND ('python -m pytest')"),
+    ] = None,
+    path: WorkspaceOption = Path("."),
+    error_number: Annotated[
+        int, typer.Option("--error", "-e", min=1, help="Which diagnosed error to fix")
+    ] = 1,
+    attempts: Annotated[
+        int | None,
+        typer.Option(
+            "--attempts", min=1, max=10, help="Most patches to try; defaults to REPAIR_MAX_ATTEMPTS"
+        ),
+    ] = None,
+    save: Annotated[
+        Path | None,
+        typer.Option("--save", help="Write the patch that fixed the tests to this file"),
+    ] = None,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", min=1, help="Seconds before each run is killed")
+    ] = None,
+) -> None:
+    """Run the tests on a copy and, if they fail, ask Claude for patches until they pass.
+
+    Each patch is tested on an isolated copy, and Claude is told why the previous ones
+    failed. The loop stops at the attempt or token limit. The real workspace is never
+    modified: the fix is only recommended.
+    """
+    settings = Settings()
+    limit = attempts or settings.repair_max_attempts
+    try:
+        code_index = build_code_index(path, settings)
+        code_index.index()
+        pipeline = build_repair_pipeline(
+            path, settings, code_index=code_index, timeout_seconds=timeout, max_attempts=limit
+        )
+        printer = _RepairPrinter(limit, settings.repair_max_tokens)
+        result = pipeline.run(
+            command or settings.test_command, error_number=error_number, listener=printer
+        )
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    _report_repair(result, save)
+
+
+class _RepairPrinter:
+    """Prints each step of the loop as soon as it finishes."""
+
+    def __init__(self, max_attempts: int, max_tokens: int) -> None:
+        self._limits = f"{_plural(max_attempts, 'attempt')}, {max_tokens} tokens"
+
+    def reproduced(self, baseline: RunReport, target: Diagnosis | None) -> None:
+        result = baseline.result
+        status = "passed" if result.passed else _status(result.exit_code)
+        typer.echo(f"tests      {status} in {result.duration_seconds:.1f}s, on an isolated copy")
+        if target is None:
+            return
+        origin = target.origin
+        where = f"  ({origin.workspace_file}:{origin.line})" if origin is not None else ""
+        typer.echo(f"error      {target.error.summary}{where}")
+        typer.echo(f"limits     {self._limits}")
+
+    def attempted(self, attempt: Attempt) -> None:
+        proposal = attempt.proposal
+        typer.echo("")
+        typer.echo(f"attempt {attempt.number}  {proposal.model}, {_tokens(proposal.usage)}")
+        typer.echo(f"proposal   {proposal.explanation}")
+        report = attempt.report
+        if report is not None and report.patch is not None:
+            applied = report.patch
+            typer.echo(
+                f"patch      {_plural(len(applied.files), 'file')} "
+                f"(+{applied.lines_added} -{applied.lines_removed})"
+            )
+        typer.echo(f"result     {_attempt_result(attempt)}")
+
+
+def _attempt_result(attempt: Attempt) -> str:
+    if attempt.outcome is AttemptOutcome.PASSED:
+        return "the tests pass"
+    if attempt.outcome is AttemptOutcome.REJECTED:
+        return f"rejected: {attempt.problem}"
+    if attempt.outcome is AttemptOutcome.REPEATED:
+        return f"{attempt.problem}; not tested again"
+    report = attempt.report
+    if report is None or report.result.timed_out:
+        return "the tests timed out"
+    if not report.diagnoses:
+        return f"the tests still fail ({_status(report.result.exit_code)})"
+    more = f" and {_plural(len(report.diagnoses) - 1, 'more error')}"
+    extra = more if len(report.diagnoses) > 1 else ""
+    return f"the tests still fail: {report.diagnoses[0].error.summary}{extra}"
+
+
+def _report_repair(result: RepairResult, save: Path | None) -> None:
+    typer.echo("")
+    if result.status is RepairStatus.PASSING:
+        typer.echo("verdict    nothing to fix: the tests already pass")
+        return
+    if result.status is RepairStatus.UNDIAGNOSED:
+        typer.echo(f"verdict    cannot fix: {result.detail}")
+        raise typer.Exit(code=1)
+    total = f"{_plural(len(result.attempts), 'attempt')}, {_tokens(result.usage)}"
+    fix = result.fix
+    if fix is None:
+        if result.status is RepairStatus.STOPPED:
+            typer.echo(f"error: {result.detail}", err=True)
+            if result.attempts:
+                typer.echo(f"spent      {total}")
+            raise typer.Exit(code=2)
+        typer.echo(f"verdict    not fixed: {result.detail}")
+        typer.echo(f"spent      {total}")
+        raise typer.Exit(code=1)
+    typer.echo(f"verdict    fixed: the tests pass with the patch of attempt {fix.number}")
+    typer.echo(f"spent      {total}")
+    if fix.report is not None and fix.report.patch is not None:
+        typer.echo("")
+        typer.echo(fix.report.patch.diff.rstrip())
+        typer.echo("")
+    if save is not None:
+        save.write_text(fix.proposal.patch.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        typer.echo(f"saved      {save} (replay it on a copy with 'healer patch {save}')")
+    typer.echo("note       the patch was only applied to a copy; review it before using it")
+
+
+def _tokens(usage: TokenUsage) -> str:
+    cached = f" ({usage.cache_read_tokens} from cache)" if usage.cache_read_tokens else ""
+    return f"{usage.input_total} tokens in{cached}, {usage.output_tokens} out"
+
+
+def _status(exit_code: int | None) -> str:
+    if exit_code is None:
+        return "timed out"
+    return f"{_PYTEST_EXIT_CODES.get(exit_code, 'failed')} (exit {exit_code})"
 
 
 def _print_applied(patch: Patch, applied: AppliedPatch | None, *, show_purpose: bool) -> None:
@@ -378,11 +507,7 @@ def _report_run(
     if as_json:
         typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
         raise typer.Exit(code=0 if result.passed else 1)
-    if result.exit_code is None:
-        status = "timed out"
-    else:
-        label = _PYTEST_EXIT_CODES.get(result.exit_code, "failed")
-        status = f"{label} (exit {result.exit_code})"
+    status = _status(result.exit_code)
     typer.echo(f"sandbox    {report.files_copied} files copied to an isolated copy, then deleted")
     typer.echo(f"command    {' '.join(result.command)}")
     typer.echo(f"result     {status} in {result.duration_seconds:.1f}s")

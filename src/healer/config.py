@@ -29,3 +29,5 @@ class Settings(BaseSettings):
     anthropic_max_retries: int = 2
     context_max_chars: int = 12_000
     context_max_distance: float = 0.7
+    repair_max_attempts: int = 3
+    repair_max_tokens: int = 100_000
