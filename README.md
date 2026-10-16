@@ -206,7 +206,7 @@ Automated tests never call the real API; they use a fake model.
 
 ## Self-correction loop: fix until the tests pass
 
-`healer run` runs the tests on an isolated copy and, when they fail, asks Claude for a patch, tests it on a fresh copy and, if the tests still fail, tells Claude what went wrong and asks again. It stops as soon as a patch makes the tests pass, or when it reaches the attempt or token limit. Your files are never modified: the working patch is shown so you can review it and apply it yourself. It needs `ANTHROPIC_API_KEY`, like `healer propose`.
+`healer run` runs the tests on an isolated copy and, when they fail, first tries a solution already verified for the same error (see below). Otherwise it asks Claude for a patch, tests it on a fresh copy and, if the tests still fail, tells Claude what went wrong and asks again. It stops as soon as a patch makes the tests pass, or when it reaches the attempt or token limit. Your files are never modified: the working patch is shown so you can review it and apply it yourself. It needs `ANTHROPIC_API_KEY`, like `healer propose`.
 
 ```bash
 docker compose exec healer healer run                                   # runs TEST_COMMAND (python -m pytest)
@@ -234,14 +234,47 @@ spent      2 attempts, 2518 tokens in (870 from cache), 388 out
 ...
 ```
 
-- **The loop is a LangGraph state graph** (`src/healer/pipeline/`): `reproduce` runs the tests without a patch, `propose` asks Claude, `test` tries the patch, and the graph goes back to `propose` until it is done.
+- **The loop is a LangGraph state graph** (`src/healer/pipeline/`): `reproduce` runs the tests without a patch, `recall` tries a stored solution, `propose` asks Claude, `test` tries the patch, and the graph goes back to `propose` until it is done; `remember` stores a new fix.
 - **Every patch starts from the original code,** not from an earlier attempt, so a bad attempt never piles up. Claude is told this and returns the complete fix each time.
 - **Feedback.** Each new request includes the earlier patches and what happened with them: the errors that remained (at most three, with their location), the end of the output when no error was recognised, or why the patch could not be applied. It also adds the functions where the last patch broke, in files that patch did not touch. Everything is redacted, as in `healer propose`.
 - **Goal:** the whole test command passes, not only the targeted error. Use a narrower command (`python -m pytest tests/test_app.py::test_x`) to focus on one test.
 - **Limits** (7.6 of the plan): at most `REPAIR_MAX_ATTEMPTS` patches (default 3; `--attempts` overrides it) and `REPAIR_MAX_TOKENS` per run (default 100,000). The token check is made before each new attempt, assuming it will cost about as much as the last one.
 - **Wasted attempts are cheap:** a patch identical to an earlier one is not tested again, and a patch that does not fit the code is reported back to Claude without running the tests. Both still count as attempts.
-- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be replayed with `healer patch`.
+- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be replayed with `healer patch`, `--no-cache` skips stored solutions (a new fix is still stored).
 - **Exit codes:** `0` when the tests pass (already or with the patch), `1` when no patch fixed them or the failure could not be diagnosed, `2` on configuration, API or command errors.
+
+## Local cache and token ledger: never pay twice for the same error
+
+The cheapest fix is the one already found. When `healer run` fixes an error with Claude, it stores the patch under the error's **signature** (the machine-independent hash from the Diagnoser). The next time the same error appears, the stored patch is replayed on an isolated copy before Claude is asked. If the tests pass, the fix costs **zero tokens**. Every incident is recorded in a local ledger, so the savings can be measured.
+
+```text
+attempt 1  local cache, 0 tokens (found by claude-sonnet-5-5 for 2909 tokens)
+proposal   ...
+result     the tests pass
+
+verdict    fixed: the tests pass with a solution from the local cache
+spent      1 attempt, 0 tokens in, 0 out; saved about 2909 tokens
+```
+
+```bash
+docker compose exec healer healer savings                      # one row per day (UTC)
+docker compose exec healer healer savings --by project --days 7
+```
+
+```text
+day         incidents  fixed  from cache  model calls  tokens used  tokens saved
+2026-10-16          2      2           1            2         2909          2909
+
+total               2      2           1            2         2909          2909
+
+reuse avoided 50% of the tokens these incidents would have cost
+```
+
+- **Verified, never trusted.** A stored solution is always tested again. If it no longer fits the code or the tests still fail, it is discarded and Claude is asked, with the failed replay included as an earlier attempt.
+- **What is stored:** one solution per signature in a per-workspace Chroma collection (`solutions-...`): the patch, the explanation, the model, the tokens it cost, and the evidence that the tests failed before it and passed after it. This is the record Phase 5 will share between machines.
+- **The ledger** is a SQLite file (`LEDGER_PATH`, `/data/healer/ledger.sqlite3` in the `healer-data` volume). Each row is one incident with metrics only: time, project, signature, error type, how it ended, which level solved it (`cache`, `model` or `none`), model attempts, tokens used and tokens saved. It never holds code, logs or error messages. Runs with nothing to fix are not recorded.
+- **Tokens saved** is an estimate: what the reused solution cost when the model found it.
+- `--no-cache` on `healer run` forces a new answer from Claude, which then replaces the stored one.
 
 ## Redaction: hide secrets before anything leaves the machine
 
