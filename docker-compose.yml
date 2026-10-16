@@ -17,9 +17,11 @@ services:
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883
       CHROMA_PATH: /data/chroma
+      LEDGER_PATH: /data/healer/ledger.sqlite3
     volumes:
       - .:/app
       - chroma-data:/data/chroma
+      - healer-data:/data/healer
       - ${WORKSPACE_PATH:-./workspace}:/workspace
     working_dir: /workspace
     depends_on:
@@ -29,3 +31,4 @@ services:
 volumes:
   mosquitto-data:
   chroma-data:
+  healer-data:
