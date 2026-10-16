@@ -10,9 +10,11 @@ from chromadb.api.types import EmbeddingFunction
 
 from healer.adapters.anthropic_proposer import AnthropicProposer
 from healer.adapters.chroma_repository import ChromaSymbolRepository
+from healer.adapters.chroma_solutions import ChromaSolutionRepository
 from healer.adapters.filesystem_patcher import FilesystemPatcher
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
+from healer.adapters.sqlite_ledger import SqliteLedger
 from healer.adapters.subprocess_runner import SubprocessRunner
 from healer.adapters.tempdir_sandbox import TempDirSandboxProvider
 from healer.adapters.workspace_paths import WorkspacePathResolver
@@ -31,9 +33,9 @@ from healer.services.fix_proposer import FixProposer
 from healer.services.sandbox_runner import SandboxRunner
 
 
-def collection_name(root: Path) -> str:
+def collection_name(root: Path, kind: str = "code") -> str:
     """One collection per workspace so projects with equal relative paths never mix."""
-    return "code-" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
+    return f"{kind}-" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
 
 
 def build_code_index(
@@ -130,12 +132,30 @@ def build_repair_pipeline(
     proposer = build_fix_proposer(
         workspace, settings, embedding_function, code_index=code_index, llm=llm
     )
+    root = WorkspaceScanner(workspace).root
     return RepairPipeline(
         runner,
         proposer,
+        build_solutions(workspace, settings, embedding_function),
+        build_ledger(settings),
+        project=str(root),
         max_attempts=max_attempts or settings.repair_max_attempts,
         max_tokens=settings.repair_max_tokens,
     )
+
+
+def build_solutions(
+    workspace: Path,
+    settings: Settings,
+    embedding_function: EmbeddingFunction[Any] | None = None,
+) -> ChromaSolutionRepository:
+    root = WorkspaceScanner(workspace).root
+    client = chromadb.PersistentClient(path=str(settings.chroma_path))
+    return ChromaSolutionRepository(client, collection_name(root, "solutions"), embedding_function)
+
+
+def build_ledger(settings: Settings) -> SqliteLedger:
+    return SqliteLedger(settings.ledger_path)
 
 
 class _LazyProposer:
