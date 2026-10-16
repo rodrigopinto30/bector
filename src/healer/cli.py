@@ -1,6 +1,8 @@
 import importlib
 import json
 import os
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -12,14 +14,22 @@ from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError
 from healer.domain.execution import RunReport
+from healer.domain.ledger import LedgerSummary, summarize, total
 from healer.domain.patch import AppliedPatch, Patch, parse_patch
 from healer.domain.proposal import SYSTEM_PROMPT, TokenUsage, render_request
 from healer.domain.redaction import Redactor
-from healer.domain.repair import Attempt, AttemptOutcome, RepairResult, RepairStatus
+from healer.domain.repair import (
+    Attempt,
+    AttemptOutcome,
+    AttemptSource,
+    RepairResult,
+    RepairStatus,
+)
 from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
+    build_ledger,
     build_repair_pipeline,
     build_sandbox_runner,
 )
@@ -364,12 +374,17 @@ def run(
     timeout: Annotated[
         float | None, typer.Option("--timeout", min=1, help="Seconds before each run is killed")
     ] = None,
+    use_cache: Annotated[
+        bool,
+        typer.Option("--cache/--no-cache", help="Try a stored solution before asking Claude"),
+    ] = True,
 ) -> None:
-    """Run the tests on a copy and, if they fail, ask Claude for patches until they pass.
+    """Run the tests on a copy and, if they fail, find a patch that makes them pass.
 
-    Each patch is tested on an isolated copy, and Claude is told why the previous ones
-    failed. The loop stops at the attempt or token limit. The real workspace is never
-    modified: the fix is only recommended.
+    A solution already verified here for the same error is tried first, for free.
+    Otherwise Claude is asked for patches, and told why the previous ones failed, until
+    the tests pass or the attempt or token limit is reached. Each patch is tested on an
+    isolated copy. The real workspace is never modified: the fix is only recommended.
     """
     settings = Settings()
     limit = attempts or settings.repair_max_attempts
@@ -381,7 +396,10 @@ def run(
         )
         printer = _RepairPrinter(limit, settings.repair_max_tokens)
         result = pipeline.run(
-            command or settings.test_command, error_number=error_number, listener=printer
+            command or settings.test_command,
+            error_number=error_number,
+            use_cache=use_cache,
+            listener=printer,
         )
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -409,7 +427,13 @@ class _RepairPrinter:
     def attempted(self, attempt: Attempt) -> None:
         proposal = attempt.proposal
         typer.echo("")
-        typer.echo(f"attempt {attempt.number}  {proposal.model}, {_tokens(proposal.usage)}")
+        if attempt.source is AttemptSource.CACHE:
+            typer.echo(
+                f"attempt {attempt.number}  local cache, 0 tokens "
+                f"(found by {proposal.model} for {attempt.saved_tokens} tokens)"
+            )
+        else:
+            typer.echo(f"attempt {attempt.number}  {proposal.model}, {_tokens(proposal.usage)}")
         typer.echo(f"proposal   {proposal.explanation}")
         report = attempt.report
         if report is not None and report.patch is not None:
@@ -419,6 +443,8 @@ class _RepairPrinter:
                 f"(+{applied.lines_added} -{applied.lines_removed})"
             )
         typer.echo(f"result     {_attempt_result(attempt)}")
+        if attempt.source is AttemptSource.CACHE and attempt.outcome is not AttemptOutcome.PASSED:
+            typer.echo("cache      the stored solution no longer works and was discarded")
 
 
 def _attempt_result(attempt: Attempt) -> str:
@@ -446,19 +472,25 @@ def _report_repair(result: RepairResult, save: Path | None) -> None:
     if result.status is RepairStatus.UNDIAGNOSED:
         typer.echo(f"verdict    cannot fix: {result.detail}")
         raise typer.Exit(code=1)
-    total = f"{_plural(len(result.attempts), 'attempt')}, {_tokens(result.usage)}"
+    spent = f"{_plural(len(result.attempts), 'attempt')}, {_tokens(result.usage)}"
     fix = result.fix
     if fix is None:
         if result.status is RepairStatus.STOPPED:
             typer.echo(f"error: {result.detail}", err=True)
             if result.attempts:
-                typer.echo(f"spent      {total}")
+                typer.echo(f"spent      {spent}")
             raise typer.Exit(code=2)
         typer.echo(f"verdict    not fixed: {result.detail}")
-        typer.echo(f"spent      {total}")
+        typer.echo(f"spent      {spent}")
         raise typer.Exit(code=1)
-    typer.echo(f"verdict    fixed: the tests pass with the patch of attempt {fix.number}")
-    typer.echo(f"spent      {total}")
+    if fix.source is AttemptSource.CACHE:
+        typer.echo("verdict    fixed: the tests pass with a solution from the local cache")
+        typer.echo(f"spent      {spent}; saved about {result.tokens_saved} tokens")
+    else:
+        typer.echo(f"verdict    fixed: the tests pass with the patch of attempt {fix.number}")
+        typer.echo(f"spent      {spent}")
+    if result.stored:
+        typer.echo("cache      stored: the same error will be fixed without Claude next time")
     if fix.report is not None and fix.report.patch is not None:
         typer.echo("")
         typer.echo(fix.report.patch.diff.rstrip())
@@ -523,6 +555,52 @@ def _report_run(
     for number, diagnosis in enumerate(report.diagnoses, start=1):
         _print_diagnosis(number, diagnosis)
     raise typer.Exit(code=0 if result.passed else 1)
+
+
+class Grouping(StrEnum):
+    DAY = "day"
+    PROJECT = "project"
+
+
+@app.command()
+def savings(
+    by: Annotated[Grouping, typer.Option("--by", help="One row per day (UTC) or project")] = (
+        Grouping.DAY
+    ),
+    days: Annotated[
+        int | None, typer.Option("--days", min=1, help="Only the incidents of the last N days")
+    ] = None,
+) -> None:
+    """Show the tokens spent fixing errors and the tokens saved by reusing solutions."""
+    since = datetime.now(UTC) - timedelta(days=days) if days is not None else None
+    try:
+        entries = build_ledger(Settings()).entries(since)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not entries:
+        typer.echo("no incidents recorded yet; 'healer run' records them")
+        return
+    rows = [*summarize(entries, by.value), total(entries)]
+    width = max(len(by.value), *(len(row.key) for row in rows))
+    typer.echo(
+        f"{by.value:<{width}}  incidents  fixed  from cache  model calls  tokens used  tokens saved"
+    )
+    for row in rows:
+        if row.key == "total":
+            typer.echo("")
+        typer.echo(_savings_row(row, width))
+    spent_and_saved = rows[-1].tokens_used + rows[-1].tokens_saved
+    if rows[-1].tokens_saved and spent_and_saved:
+        share = round(100 * rows[-1].tokens_saved / spent_and_saved)
+        typer.echo(f"\nreuse avoided {share}% of the tokens these incidents would have cost")
+
+
+def _savings_row(row: LedgerSummary, width: int) -> str:
+    return (
+        f"{row.key:<{width}}  {row.incidents:>9}  {row.fixed:>5}  {row.from_cache:>10}  "
+        f"{row.model_attempts:>11}  {row.tokens_used:>11}  {row.tokens_saved:>12}"
+    )
 
 
 @app.command()

@@ -447,3 +447,57 @@ def test_run_rejects_commands_outside_the_allowlist(
     assert result.exit_code == 2
     assert "Command not allowed" in result.output
     assert scripted_llm.prompts == []
+
+
+@pytest.mark.integration
+def test_run_reuses_a_stored_solution_and_records_the_savings(
+    sample: Path, scripted_llm: ScriptedLLM
+) -> None:
+    command = ["run", "python -m pytest tests/test_app.py", "--path", str(sample)]
+    first = runner.invoke(cli.app, command)
+    assert first.exit_code == 0, first.output
+    assert "cache      stored: the same error will be fixed without Claude next time" in (
+        first.stdout
+    )
+
+    second = runner.invoke(cli.app, command)
+    assert second.exit_code == 0, second.output
+    assert "attempt 1  local cache, 0 tokens (found by claude-sonnet-5-5 for 2040 tokens)" in (
+        second.stdout
+    )
+    assert "verdict    fixed: the tests pass with a solution from the local cache" in second.stdout
+    assert "spent      1 attempt, 0 tokens in, 0 out; saved about 2040 tokens" in second.stdout
+    assert len(scripted_llm.prompts) == 2
+
+    forced = runner.invoke(cli.app, [*command, "--no-cache"])
+    assert forced.exit_code == 0, forced.output
+    assert "local cache" not in forced.stdout
+    assert len(scripted_llm.prompts) == 3
+
+    report = runner.invoke(cli.app, ["savings"])
+    assert report.exit_code == 0, report.output
+    lines = report.stdout.splitlines()
+    assert lines[0].split() == [
+        "day",
+        "incidents",
+        "fixed",
+        "from",
+        "cache",
+        "model",
+        "calls",
+        "tokens",
+        "used",
+        "tokens",
+        "saved",
+    ]
+    assert lines[-3].split() == ["total", "3", "3", "1", "3", "3060", "2040"]
+    assert "reuse avoided 40% of the tokens" in report.stdout
+
+    by_project = runner.invoke(cli.app, ["savings", "--by", "project", "--days", "1"])
+    assert str(sample.resolve()) in by_project.stdout
+
+
+def test_savings_without_incidents() -> None:
+    result = runner.invoke(cli.app, ["savings"])
+    assert result.exit_code == 0
+    assert "no incidents recorded yet" in result.stdout

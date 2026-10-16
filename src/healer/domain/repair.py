@@ -19,14 +19,23 @@ class AttemptOutcome(StrEnum):
     REPEATED = "repeated"
 
 
+class AttemptSource(StrEnum):
+    CACHE = "cache"
+    MODEL = "model"
+
+
 class Attempt(BaseModel):
-    """One proposal from the model and what happened when it was tried on a copy."""
+    """One proposed patch and what happened when it was tried on a copy."""
 
     model_config = ConfigDict(frozen=True)
 
     number: int = Field(ge=1)
     proposal: Proposal
     outcome: AttemptOutcome
+    source: AttemptSource = AttemptSource.MODEL
+    saved_tokens: int = Field(
+        default=0, ge=0, description="For a reused solution, the tokens it cost originally."
+    )
     report: RunReport | None = Field(
         default=None, description="The test run with the patch; None when it was not run."
     )
@@ -80,10 +89,21 @@ class RepairResult(BaseModel):
     baseline: RunReport = Field(description="The run without any patch, before the loop.")
     target: Diagnosis | None = Field(default=None, description="The error the loop tried to fix.")
     attempts: tuple[Attempt, ...] = ()
+    stored: bool = Field(default=False, description="The fix was kept for reuse.")
 
     @property
     def fix(self) -> Attempt | None:
         return next((a for a in self.attempts if a.outcome is AttemptOutcome.PASSED), None)
+
+    @property
+    def model_attempts(self) -> int:
+        return sum(1 for a in self.attempts if a.source is AttemptSource.MODEL)
+
+    @property
+    def tokens_saved(self) -> int:
+        """Tokens avoided by reusing a solution instead of asking the model again."""
+        fix = self.fix
+        return fix.saved_tokens if fix is not None else 0
 
     @property
     def usage(self) -> TokenUsage:

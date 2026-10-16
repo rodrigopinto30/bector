@@ -1,14 +1,17 @@
 """Interfaces the domain and services depend on. Adapters implement them."""
 
 from collections.abc import Iterable, Iterator, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
 from healer.domain.diagnosis import TracedError
 from healer.domain.execution import RunResult
+from healer.domain.ledger import LedgerEntry
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
 from healer.domain.proposal import Proposal
+from healer.domain.solution import Solution
 
 
 class SourceScanner(Protocol):
@@ -104,4 +107,26 @@ class PatchProposer(Protocol):
 
     def propose(self, system: str, prompt: str) -> Proposal:
         """Return the proposal; raise ``LLMError`` when the model gives no usable answer."""
+        ...
+
+
+class SolutionRepository(Protocol):
+    """Verified solutions of this workspace, one per error signature."""
+
+    def find(self, signature: str) -> Solution | None: ...
+
+    def save(self, solution: Solution) -> None:
+        """Store ``solution``, replacing any earlier one for the same signature."""
+        ...
+
+    def remove(self, signature: str) -> None: ...
+
+
+class Ledger(Protocol):
+    """Append-only record of what each incident cost."""
+
+    def record(self, entry: LedgerEntry) -> None: ...
+
+    def entries(self, since: datetime | None = None) -> list[LedgerEntry]:
+        """Return the entries recorded at or after ``since``, oldest first."""
         ...

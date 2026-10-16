@@ -56,3 +56,7 @@ class LLMError(HealerError):
 
 class MissingContextError(HealerError):
     """There is no indexed project code related to the error to show the model."""
+
+
+class LedgerError(HealerError):
+    """The token ledger could not be read or written."""

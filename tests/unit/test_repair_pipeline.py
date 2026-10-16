@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import pytest
 
@@ -6,14 +7,18 @@ from healer.domain.diagnosis import Diagnosis, StackFrame, TracedError
 from healer.domain.errors import (
     CommandNotAllowedError,
     ExecutionError,
+    IndexingError,
+    LedgerError,
     LLMError,
     PatchConflictError,
     RejectedProposalError,
 )
 from healer.domain.execution import RunReport, RunResult
+from healer.domain.ledger import LedgerEntry, Resolution
 from healer.domain.patch import AppliedPatch, FileEdit, Patch
 from healer.domain.proposal import Proposal, TokenUsage
-from healer.domain.repair import Attempt, AttemptOutcome, RepairStatus
+from healer.domain.repair import Attempt, AttemptOutcome, AttemptSource, RepairStatus
+from healer.domain.solution import Solution
 from healer.pipeline.repair import RepairPipeline
 
 
@@ -119,10 +124,75 @@ class Recorder:
         self.events.append(f"attempt {attempt.number} {attempt.outcome}")
 
 
+NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+
+
+class FakeSolutions:
+    def __init__(self, *stored: Solution, fail: bool = False) -> None:
+        self.stored = {s.signature: s for s in stored}
+        self.fail = fail
+        self.removed: list[str] = []
+
+    def find(self, signature: str) -> Solution | None:
+        return self.stored.get(signature)
+
+    def save(self, solution: Solution) -> None:
+        if self.fail:
+            raise IndexingError("disk full")
+        self.stored[solution.signature] = solution
+
+    def remove(self, signature: str) -> None:
+        self.removed.append(signature)
+        self.stored.pop(signature, None)
+
+
+class FakeLedger:
+    def __init__(self, fail: bool = False) -> None:
+        self.recorded: list[LedgerEntry] = []
+        self.fail = fail
+
+    def record(self, entry: LedgerEntry) -> None:
+        if self.fail:
+            raise LedgerError("read-only")
+        self.recorded.append(entry)
+
+    def entries(self, since: datetime | None = None) -> list[LedgerEntry]:
+        return self.recorded
+
+
+def solution(answer: Patch, tokens: int = 2_900) -> Solution:
+    return Solution(
+        signature=KEY_ERROR.signature,
+        error="KeyError: 'db'",
+        patch=answer,
+        explanation="stored fix",
+        model="claude-sonnet-5-5",
+        tokens_spent=tokens,
+        command="python -m pytest",
+        exit_code_before=1,
+        verified_at=NOW,
+    )
+
+
 def build(
-    runner: FakeRunner, proposer: FakeProposer, *, attempts: int = 3, tokens: int = 100_000
+    runner: FakeRunner,
+    proposer: FakeProposer,
+    *,
+    attempts: int = 3,
+    tokens: int = 100_000,
+    solutions: FakeSolutions | None = None,
+    ledger: FakeLedger | None = None,
 ) -> RepairPipeline:
-    return RepairPipeline(runner, proposer, max_attempts=attempts, max_tokens=tokens)  # type: ignore[arg-type]
+    return RepairPipeline(
+        runner,  # type: ignore[arg-type]
+        proposer,  # type: ignore[arg-type]
+        solutions if solutions is not None else FakeSolutions(),
+        ledger if ledger is not None else FakeLedger(),
+        project="/workspace",
+        max_attempts=attempts,
+        max_tokens=tokens,
+        clock=lambda: NOW,
+    )
 
 
 def test_fixed_on_the_first_attempt() -> None:
@@ -292,3 +362,108 @@ def test_feedback_lists_at_most_three_failures() -> None:
     assert feedback.count("- ValueError") == 3
     assert "and 2 more" in feedback
     assert "at app/cfg.py:2 in read_db" in feedback
+
+
+def test_a_stored_solution_fixes_the_error_without_the_model() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    proposer, ledger = FakeProposer([]), FakeLedger()
+    result = build(runner, proposer, solutions=FakeSolutions(solution(FULL)), ledger=ledger).run(
+        "python -m pytest"
+    )
+    assert result.status is RepairStatus.FIXED
+    assert proposer.calls == []
+    [attempt] = result.attempts
+    assert attempt.source is AttemptSource.CACHE and attempt.outcome is AttemptOutcome.PASSED
+    assert result.usage.total == 0 and result.tokens_saved == 2_900
+    assert result.stored is False
+    [entry] = ledger.recorded
+    assert entry.resolution is Resolution.CACHE
+    assert (entry.model_attempts, entry.usage.total, entry.tokens_saved) == (0, 0, 2_900)
+
+
+def test_a_stale_solution_is_discarded_and_the_model_is_asked() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    solutions = FakeSolutions(solution(PARTIAL))
+    proposer = FakeProposer([FULL])
+    result = build(runner, proposer, solutions=solutions, attempts=1).run("python -m pytest")
+    assert result.status is RepairStatus.FIXED
+    assert [a.source for a in result.attempts] == [AttemptSource.CACHE, AttemptSource.MODEL]
+    assert solutions.removed == [KEY_ERROR.signature]
+    [stale] = proposer.calls[0][1]
+    assert stale.proposal.patch == PARTIAL
+    assert result.tokens_saved == 0
+    assert solutions.stored[KEY_ERROR.signature].patch == FULL
+
+
+def test_a_fix_from_the_model_is_stored_with_its_evidence_and_cost() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    solutions, ledger = FakeSolutions(), FakeLedger()
+    result = build(runner, FakeProposer([PARTIAL, FULL]), solutions=solutions, ledger=ledger).run(
+        "python -m pytest tests"
+    )
+    assert result.stored is True
+    stored = solutions.stored[KEY_ERROR.signature]
+    assert stored.patch == FULL and stored.tokens_spent == 2_000
+    assert (stored.command, stored.exit_code_before, stored.verified_at) == (
+        "python -m pytest tests",
+        1,
+        NOW,
+    )
+    [entry] = ledger.recorded
+    assert entry.resolution is Resolution.MODEL
+    assert (entry.model_attempts, entry.usage.total, entry.tokens_saved) == (2, 2_000, 0)
+    assert (entry.project, entry.error_type, entry.recorded_at) == ("/workspace", "KeyError", NOW)
+
+
+def test_without_the_cache_a_stored_solution_is_not_tried_but_replaced() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    solutions = FakeSolutions(solution(PARTIAL))
+    result = build(runner, FakeProposer([FULL]), solutions=solutions).run(
+        "python -m pytest", use_cache=False
+    )
+    assert [a.source for a in result.attempts] == [AttemptSource.MODEL]
+    assert runner.runs == [None, FULL]
+    assert solutions.stored[KEY_ERROR.signature].patch == FULL
+
+
+def test_an_unresolved_incident_is_recorded_without_storing_anything() -> None:
+    solutions, ledger = FakeSolutions(), FakeLedger()
+    build(
+        FakeRunner(report(KEY_ERROR)),
+        FakeProposer([PARTIAL]),
+        attempts=1,
+        solutions=solutions,
+        ledger=ledger,
+    ).run("python -m pytest")
+    assert solutions.stored == {}
+    [entry] = ledger.recorded
+    assert entry.resolution is Resolution.NONE and entry.status is RepairStatus.OUT_OF_ATTEMPTS
+
+
+def test_runs_without_attempts_are_not_recorded() -> None:
+    ledger = FakeLedger()
+    build(FakeRunner(report()), FakeProposer([]), ledger=ledger).run("python -m pytest")
+    build(FakeRunner(report(KEY_ERROR)), FakeProposer([LLMError("no key")]), ledger=ledger).run(
+        "python -m pytest"
+    )
+    assert ledger.recorded == []
+
+
+def test_storage_failures_do_not_hide_the_fix() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    result = build(
+        runner,
+        FakeProposer([FULL]),
+        solutions=FakeSolutions(fail=True),
+        ledger=FakeLedger(fail=True),
+    ).run("python -m pytest")
+    assert result.status is RepairStatus.FIXED
+    assert result.stored is False
+
+
+def test_a_sandbox_failure_while_replaying_keeps_the_stored_solution() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: ExecutionError("cannot start")})
+    solutions = FakeSolutions(solution(FULL))
+    result = build(runner, FakeProposer([]), solutions=solutions).run("python -m pytest")
+    assert result.status is RepairStatus.STOPPED
+    assert solutions.removed == []

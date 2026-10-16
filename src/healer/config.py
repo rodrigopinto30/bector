@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     anthropic_api_key: SecretStr | None = None
     chroma_path: Path = Path(".healer/chroma")
+    ledger_path: Path = Path(".healer/ledger.sqlite3")
     mqtt_host: str = "localhost"
     mqtt_port: int = 1883
     test_command: str = "python -m pytest"

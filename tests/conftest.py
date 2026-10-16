@@ -1,5 +1,6 @@
 import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -37,6 +38,14 @@ class FakeEmbeddingFunction(EmbeddingFunction[Documents]):
     @staticmethod
     def build_from_config(config: dict[str, Any]) -> "FakeEmbeddingFunction":
         return FakeEmbeddingFunction()
+
+
+@pytest.fixture(autouse=True)
+def isolated_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own ledger, so none can write to the real one."""
+    path = tmp_path / "ledger.sqlite3"
+    monkeypatch.setenv("LEDGER_PATH", str(path))
+    return path
 
 
 @pytest.fixture
