@@ -1,9 +1,13 @@
 """``PatchApplier`` that edits files under a root directory, all or nothing."""
 
+import contextlib
 import difflib
+import hashlib
+import os
+from collections.abc import Mapping
 from pathlib import Path
 
-from healer.domain.errors import InvalidPatchError, PatchConflictError
+from healer.domain.errors import InvalidPatchError, PatchConflictError, WorkspaceError
 from healer.domain.patch import AppliedPatch, FileEdit, Patch
 
 
@@ -12,12 +16,17 @@ class FilesystemPatcher:
 
     The text to replace must appear exactly once. If it is not found verbatim, a
     match that ignores trailing whitespace is accepted, as long as it is unique.
+    Existing files are rewritten in place, so they keep their owner and permissions;
+    new files and folders get the owner of the folder they are created in. If a write
+    fails, the files already written are restored.
     """
 
     def __init__(self, *, max_changed_lines: int | None = None) -> None:
         self._max_changed_lines = max_changed_lines
 
-    def apply(self, patch: Patch, root: Path) -> AppliedPatch:
+    def apply(
+        self, patch: Patch, root: Path, *, expected: Mapping[str, str] | None = None
+    ) -> AppliedPatch:
         base = root.resolve()
         originals: dict[str, str | None] = {}
         contents: dict[str, str] = {}
@@ -25,6 +34,7 @@ class FilesystemPatcher:
             if edit.path not in contents:
                 target = _target(base, edit.path)
                 original = _read(target, edit.path)
+                _check_unchanged(edit.path, original, expected)
                 originals[edit.path] = original
                 contents[edit.path] = original or ""
             contents[edit.path] = _apply_edit(contents[edit.path], edit, originals[edit.path])
@@ -34,11 +44,72 @@ class FilesystemPatcher:
                 f"Patch changes {applied.lines_changed} lines; "
                 f"the limit is {self._max_changed_lines}"
             )
-        for path, text in contents.items():
-            target = _target(base, path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
+        _write(base, originals, contents)
         return applied
+
+
+def _checksum(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _check_unchanged(path: str, original: str | None, expected: Mapping[str, str] | None) -> None:
+    if expected is None or path not in expected:
+        return
+    if original is None or _checksum(original) != expected[path]:
+        raise PatchConflictError(f"{path}: changed since the patch was tested")
+
+
+def _write(base: Path, originals: dict[str, str | None], contents: dict[str, str]) -> None:
+    written: list[tuple[Path, str | None]] = []
+    folders: list[Path] = []
+    for path, text in contents.items():
+        target = _target(base, path)
+        try:
+            if originals[path] is None:
+                folders.extend(_make_folders(base, target.parent))
+            written.append((target, originals[path]))
+            target.write_text(text, encoding="utf-8")
+            if originals[path] is None:
+                _inherit_owner(target)
+        except OSError as exc:
+            _restore(written, folders)
+            raise WorkspaceError(
+                f"{path}: could not be written ({exc.strerror or exc}); nothing was changed"
+            ) from exc
+
+
+def _make_folders(base: Path, folder: Path) -> list[Path]:
+    created = []
+    current = base
+    for part in folder.relative_to(base).parts:
+        current = current / part
+        if not current.exists():
+            current.mkdir()
+            _inherit_owner(current)
+            created.append(current)
+    return created
+
+
+def _inherit_owner(path: Path) -> None:
+    """Give ``path`` the owner of its folder, so a process running as root leaves no
+    root-owned files in the developer's project. Ignored when not allowed."""
+    folder = path.parent.stat()
+    current = path.stat()
+    if (current.st_uid, current.st_gid) != (folder.st_uid, folder.st_gid):
+        with contextlib.suppress(OSError):
+            os.chown(path, folder.st_uid, folder.st_gid)
+
+
+def _restore(written: list[tuple[Path, str | None]], folders: list[Path]) -> None:
+    for target, original in reversed(written):
+        with contextlib.suppress(OSError):
+            if original is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(original, encoding="utf-8")
+    for folder in reversed(folders):
+        with contextlib.suppress(OSError):
+            folder.rmdir()
 
 
 def _target(base: Path, path: str) -> Path:
@@ -131,6 +202,7 @@ def _summary(originals: dict[str, str | None], contents: dict[str, str]) -> Appl
         diff="".join(chunks),
         lines_added=added,
         lines_removed=removed,
+        checksums={path: _checksum(old) for path, old in originals.items() if old is not None},
     )
 
 

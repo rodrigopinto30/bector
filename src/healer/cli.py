@@ -28,6 +28,7 @@ from healer.domain.repair import (
 from healer.factory import (
     build_code_index,
     build_diagnoser,
+    build_fix_installer,
     build_fix_proposer,
     build_ledger,
     build_repair_pipeline,
@@ -69,6 +70,14 @@ def doctor() -> None:
 
 WorkspaceOption = Annotated[
     Path, typer.Option("--path", "-p", help="Workspace root that was indexed")
+]
+
+ApplyOption = Annotated[
+    bool | None,
+    typer.Option(
+        "--apply/--no-apply",
+        help="Apply the fix to your files without asking, or never; asks by default",
+    ),
 ]
 
 
@@ -378,13 +387,14 @@ def run(
         bool,
         typer.Option("--cache/--no-cache", help="Try a stored solution before asking Claude"),
     ] = True,
+    apply: ApplyOption = None,
 ) -> None:
     """Run the tests on a copy and, if they fail, find a patch that makes them pass.
 
     A solution already verified here for the same error is tried first, for free.
     Otherwise Claude is asked for patches, and told why the previous ones failed, until
     the tests pass or the attempt or token limit is reached. Each patch is tested on an
-    isolated copy. The real workspace is never modified: the fix is only recommended.
+    isolated copy. The fix is then shown and applied to your files only if you accept it.
     """
     settings = Settings()
     limit = attempts or settings.repair_max_attempts
@@ -404,7 +414,9 @@ def run(
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
-    _report_repair(result, save)
+    fix = _report_repair(result, save)
+    if fix is not None and fix.report is not None and fix.report.patch is not None:
+        _offer_fix(path, settings, fix.proposal.patch, fix.report.patch, apply=apply, saved=save)
 
 
 class _RepairPrinter:
@@ -464,11 +476,12 @@ def _attempt_result(attempt: Attempt) -> str:
     return f"the tests still fail: {report.diagnoses[0].error.summary}{extra}"
 
 
-def _report_repair(result: RepairResult, save: Path | None) -> None:
+def _report_repair(result: RepairResult, save: Path | None) -> Attempt | None:
+    """Print how the loop ended; return the fix, or None when there is nothing to fix."""
     typer.echo("")
     if result.status is RepairStatus.PASSING:
         typer.echo("verdict    nothing to fix: the tests already pass")
-        return
+        return None
     if result.status is RepairStatus.UNDIAGNOSED:
         typer.echo(f"verdict    cannot fix: {result.detail}")
         raise typer.Exit(code=1)
@@ -491,14 +504,82 @@ def _report_repair(result: RepairResult, save: Path | None) -> None:
         typer.echo(f"spent      {spent}")
     if result.stored:
         typer.echo("cache      stored: the same error will be fixed without Claude next time")
-    if fix.report is not None and fix.report.patch is not None:
-        typer.echo("")
-        typer.echo(fix.report.patch.diff.rstrip())
-        typer.echo("")
     if save is not None:
         save.write_text(fix.proposal.patch.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        typer.echo(f"saved      {save} (replay it on a copy with 'healer patch {save}')")
-    typer.echo("note       the patch was only applied to a copy; review it before using it")
+        typer.echo(f"saved      {save}")
+    if fix.report is not None and fix.report.patch is not None:
+        applied = fix.report.patch
+        typer.echo("")
+        typer.echo(
+            f"recommended patch: {_plural(len(applied.files), 'file')} "
+            f"(+{applied.lines_added} -{applied.lines_removed}), tested on a copy"
+        )
+        typer.echo("")
+        _echo_diff(applied.diff)
+        typer.echo("")
+    return fix
+
+
+def _offer_fix(
+    path: Path,
+    settings: Settings,
+    patch: Patch,
+    tested: AppliedPatch,
+    *,
+    apply: bool | None,
+    saved: Path | None,
+) -> None:
+    """Write the tested patch to the workspace if the developer accepts it."""
+    try:
+        installer = build_fix_installer(path, settings)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    accepted = apply
+    if accepted is None:
+        accepted = _confirm(f"apply this patch to your files in {installer.workspace}?")
+    if not accepted:
+        later = (
+            f"apply it later with 'healer apply {saved}'"
+            if saved is not None
+            else "save it with --save FILE to apply it later with 'healer apply FILE'"
+        )
+        typer.echo(f"skipped    your files were not changed; {later}")
+        return
+    try:
+        applied = installer.install(patch, tested)
+    except HealerError as exc:
+        typer.echo(f"error: not applied, your files were not changed: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(
+        f"applied    {_plural(len(applied.files), 'file')} changed in your workspace "
+        f"(+{applied.lines_added} -{applied.lines_removed})"
+    )
+
+
+def _confirm(question: str) -> bool:
+    """Ask yes or no, defaulting to no; no answer (closed input) also means no."""
+    try:
+        return typer.confirm(question, default=False)
+    except typer.Abort:
+        typer.echo("")
+        return False
+
+
+_DIFF_COLORS = (
+    ("+++", typer.colors.BRIGHT_WHITE),
+    ("---", typer.colors.BRIGHT_WHITE),
+    ("@@", typer.colors.CYAN),
+    ("+", typer.colors.GREEN),
+    ("-", typer.colors.RED),
+)
+
+
+def _echo_diff(diff: str) -> None:
+    """Print a unified diff, in color when the terminal supports it."""
+    for line in diff.rstrip().splitlines():
+        color = next((c for prefix, c in _DIFF_COLORS if line.startswith(prefix)), None)
+        typer.secho(line, fg=color, bold=line.startswith(("+++", "---")))
 
 
 def _tokens(usage: TokenUsage) -> str:
@@ -524,7 +605,7 @@ def _print_applied(patch: Patch, applied: AppliedPatch | None, *, show_purpose: 
     if show_purpose and patch.description:
         typer.echo(f"purpose    {patch.description}")
     typer.echo("")
-    typer.echo(applied.diff.rstrip())
+    _echo_diff(applied.diff)
     typer.echo("")
 
 
@@ -539,15 +620,7 @@ def _report_run(
     if as_json:
         typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
         raise typer.Exit(code=0 if result.passed else 1)
-    status = _status(result.exit_code)
-    typer.echo(f"sandbox    {report.files_copied} files copied to an isolated copy, then deleted")
-    typer.echo(f"command    {' '.join(result.command)}")
-    typer.echo(f"result     {status} in {result.duration_seconds:.1f}s")
-    if result.output_truncated:
-        typer.echo("output     truncated: only the last part was kept")
-    if show_output:
-        typer.echo("")
-        typer.echo(result.output.rstrip())
+    _print_run(report, show_output=show_output)
     if verdict:
         outcome = "the tests pass with this patch" if result.passed else "the tests still fail"
         typer.echo(f"verdict    {outcome}")
@@ -555,6 +628,65 @@ def _report_run(
     for number, diagnosis in enumerate(report.diagnoses, start=1):
         _print_diagnosis(number, diagnosis)
     raise typer.Exit(code=0 if result.passed else 1)
+
+
+def _print_run(report: RunReport, *, show_output: bool) -> None:
+    result = report.result
+    typer.echo(f"sandbox    {report.files_copied} files copied to an isolated copy, then deleted")
+    typer.echo(f"command    {' '.join(result.command)}")
+    typer.echo(f"result     {_status(result.exit_code)} in {result.duration_seconds:.1f}s")
+    if result.output_truncated:
+        typer.echo("output     truncated: only the last part was kept")
+    if show_output:
+        typer.echo("")
+        typer.echo(result.output.rstrip())
+
+
+@app.command(name="apply")
+def apply_command(
+    patch_file: Annotated[
+        Path, typer.Argument(help="JSON patch, for example one saved with 'healer run --save'")
+    ],
+    command: Annotated[
+        str | None,
+        typer.Argument(help="Test command; defaults to TEST_COMMAND ('python -m pytest')"),
+    ] = None,
+    path: WorkspaceOption = Path("."),
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Apply without asking once the tests pass")
+    ] = False,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", min=1, help="Seconds before the run is killed")
+    ] = None,
+    show_output: Annotated[
+        bool, typer.Option("--output", help="Also print the captured test output")
+    ] = False,
+) -> None:
+    """Test a patch on a copy and, if the tests pass and you accept it, apply it to your files.
+
+    Your files are written only if every file the patch touches is still the one that was
+    tested; otherwise nothing is changed.
+    """
+    settings = Settings()
+    try:
+        proposal = parse_patch(read_log(None if str(patch_file) == "-" else patch_file))
+        runner = build_sandbox_runner(path, settings, timeout_seconds=timeout)
+        report = runner.run_tests(command or settings.test_command, patch=proposal)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    _print_applied(proposal, report.patch, show_purpose=True)
+    _print_run(report, show_output=show_output)
+    if not report.result.passed or report.patch is None:
+        typer.echo("verdict    the tests still fail with this patch; your files were not changed")
+        typer.echo("")
+        for number, diagnosis in enumerate(report.diagnoses, start=1):
+            _print_diagnosis(number, diagnosis)
+        raise typer.Exit(code=1)
+    typer.echo("verdict    the tests pass with this patch")
+    typer.echo("")
+    saved = None if str(patch_file) == "-" else patch_file
+    _offer_fix(path, settings, proposal, report.patch, apply=True if yes else None, saved=saved)
 
 
 class Grouping(StrEnum):

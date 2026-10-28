@@ -206,12 +206,13 @@ Automated tests never call the real API; they use a fake model.
 
 ## Self-correction loop: fix until the tests pass
 
-`healer run` runs the tests on an isolated copy and, when they fail, first tries a solution already verified for the same error (see below). Otherwise it asks Claude for a patch, tests it on a fresh copy and, if the tests still fail, tells Claude what went wrong and asks again. It stops as soon as a patch makes the tests pass, or when it reaches the attempt or token limit. Your files are never modified: the working patch is shown so you can review it and apply it yourself. It needs `ANTHROPIC_API_KEY`, like `healer propose`.
+`healer run` runs the tests on an isolated copy and, when they fail, first tries a solution already verified for the same error (see below). Otherwise it asks Claude for a patch, tests it on a fresh copy and, if the tests still fail, tells Claude what went wrong and asks again. It stops as soon as a patch makes the tests pass, or when it reaches the attempt or token limit. The working patch is then shown, and it is written to your files only if you accept it (see [Applying a fix](#applying-a-fix-you-decide)). It needs `ANTHROPIC_API_KEY`, like `healer propose`.
 
 ```bash
 docker compose exec healer healer run                                   # runs TEST_COMMAND (python -m pytest)
 docker compose exec healer healer run "python -m pytest tests/test_app.py" --attempts 5
 docker compose exec healer healer run --save fix.json                   # keep the patch that worked
+docker compose exec healer healer run --no-apply                        # only recommend, never ask
 ```
 
 ```text
@@ -240,8 +241,8 @@ spent      2 attempts, 2518 tokens in (870 from cache), 388 out
 - **Goal:** the whole test command passes, not only the targeted error. Use a narrower command (`python -m pytest tests/test_app.py::test_x`) to focus on one test.
 - **Limits** (7.6 of the plan): at most `REPAIR_MAX_ATTEMPTS` patches (default 3; `--attempts` overrides it) and `REPAIR_MAX_TOKENS` per run (default 100,000). The token check is made before each new attempt, assuming it will cost about as much as the last one.
 - **Wasted attempts are cheap:** a patch identical to an earlier one is not tested again, and a patch that does not fit the code is reported back to Claude without running the tests. Both still count as attempts.
-- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be replayed with `healer patch`, `--no-cache` skips stored solutions (a new fix is still stored).
-- **Exit codes:** `0` when the tests pass (already or with the patch), `1` when no patch fixed them or the failure could not be diagnosed, `2` on configuration, API or command errors.
+- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be applied later with `healer apply`, `--no-cache` skips stored solutions (a new fix is still stored), `--apply`/`--no-apply` apply the fix without asking or never.
+- **Exit codes:** `0` when the tests pass (already or with the patch), whether or not you apply it; `1` when no patch fixed them or the failure could not be diagnosed; `2` on configuration, API or command errors, or when an accepted patch could not be written.
 
 ## Local cache and token ledger: never pay twice for the same error
 
@@ -275,6 +276,44 @@ reuse avoided 50% of the tokens these incidents would have cost
 - **The ledger** is a SQLite file (`LEDGER_PATH`, `/data/healer/ledger.sqlite3` in the `healer-data` volume). Each row is one incident with metrics only: time, project, signature, error type, how it ended, which level solved it (`cache`, `model` or `none`), model attempts, tokens used and tokens saved. It never holds code, logs or error messages. Runs with nothing to fix are not recorded.
 - **Tokens saved** is an estimate: what the reused solution cost when the model found it.
 - `--no-cache` on `healer run` forces a new answer from Claude, which then replaces the stored one.
+
+## Applying a fix: you decide
+
+Every fix is tested on a copy first. Only then is it shown to you as a colored diff, and your files change only if you answer yes. This is the only step that writes to your project.
+
+```text
+verdict    fixed: the tests pass with a solution from the local cache
+spent      1 attempt, 0 tokens in, 0 out; saved about 2905 tokens
+
+recommended patch: 2 files (+3 -2), tested on a copy
+
+--- a/app/cfg.py
++++ b/app/cfg.py
+@@ -1,3 +1,3 @@
+ def read_db(config):
+     """Return the database name from the configuration."""
+-    return config["db"]
++    return config.get("db", "postgres")
+...
+
+apply this patch to your files in /workspace? [y/N]: y
+applied    2 files changed in your workspace (+3 -2)
+```
+
+`healer apply` does the same with a saved patch: it tests it on a fresh copy and, if the tests pass, asks before writing it.
+
+```bash
+docker compose exec healer healer run --save fix.json     # answer "n" to keep it for later
+docker compose exec healer healer apply fix.json          # test it again on a copy, then ask
+docker compose exec healer healer apply fix.json --yes    # apply without asking if the tests pass
+```
+
+- **No by default.** Pressing Enter, or running without a terminal (closed input, CI), means no. `--apply` on `healer run` and `--yes` on `healer apply` skip the question; `--no-apply` never asks and never writes.
+- **Nothing changed since the test.** The patch is written only if every file it touches still has exactly the content that was tested (compared by SHA-256). If you edited one of them in the meantime, nothing is written; run it again.
+- **All or nothing.** The patch follows the same rules as on the copy (paths inside the project, size limits, no symlinks). If writing one file fails, the files already written are restored.
+- **Your files stay yours.** Existing files are rewritten in place, so they keep their owner and permissions. New files and folders get the owner of the folder they are created in, so the container, which runs as root, leaves no root-owned files in your project.
+- Only the files of the patch are checked. If you changed other files after the test, the tests may behave differently; `healer apply` tests the patch again against the current code.
+- **Exit codes** of `healer apply`: `0` when the tests pass with the patch (applied or not), `1` when they still fail (nothing is written), `2` on invalid patches, patches that no longer fit the code, or write errors.
 
 ## Redaction: hide secrets before anything leaves the machine
 

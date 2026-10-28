@@ -45,6 +45,10 @@ class AppliedPatch(BaseModel):
     diff: str
     lines_added: int = Field(ge=0)
     lines_removed: int = Field(ge=0)
+    checksums: dict[str, str] = Field(
+        default_factory=dict,
+        description="SHA-256 of each file that existed before the patch, to detect later edits.",
+    )
 
     @property
     def lines_changed(self) -> int:
