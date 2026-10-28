@@ -258,6 +258,43 @@ def test_patch_command_rejects_bad_patches(sample: Path, patch_text: str, messag
     assert message in result.output
 
 
+@pytest.mark.integration
+def test_apply_command_tests_the_patch_and_applies_it_after_confirmation(
+    sample: Path, tmp_path: Path
+) -> None:
+    (sample / "tests" / "test_collect.py").unlink()
+    saved = tmp_path / "fix.json"
+    saved.write_text(FIX_PATCH)
+    command = ["apply", str(saved), "python -m pytest tests/test_app.py", "--path", str(sample)]
+    original = (sample / "app" / "cfg.py").read_text()
+
+    declined = runner.invoke(cli.app, command, input="n\n")
+    assert declined.exit_code == 0, declined.output
+    assert "verdict    the tests pass with this patch" in declined.stdout
+    assert "skipped    your files were not changed" in declined.stdout
+    assert (sample / "app" / "cfg.py").read_text() == original
+
+    accepted = runner.invoke(cli.app, [*command, "--yes"])
+    assert accepted.exit_code == 0, accepted.output
+    assert "applied    2 files changed in your workspace (+2 -2)" in accepted.stdout
+    assert 'return config.get("db")' in (sample / "app" / "cfg.py").read_text()
+
+
+@pytest.mark.integration
+def test_apply_command_never_applies_a_patch_whose_tests_fail(sample: Path) -> None:
+    original = (sample / "app" / "cfg.py").read_text()
+    partial_fix = json.dumps({"edits": json.loads(FIX_PATCH)["edits"][:1]})
+    result = runner.invoke(
+        cli.app,
+        ["apply", "-", "python -m pytest tests/test_app.py", "--path", str(sample), "--yes"],
+        input=partial_fix,
+    )
+    assert result.exit_code == 1, result.output
+    assert "the tests still fail with this patch; your files were not changed" in result.stdout
+    assert "AssertionError" in result.stdout
+    assert (sample / "app" / "cfg.py").read_text() == original
+
+
 class FakeLLM:
     """Stands in for Claude: proposes the read_db fix for the sample project."""
 
@@ -414,10 +451,43 @@ def test_run_retries_with_feedback_until_the_tests_pass(
     assert '+    return config.get("db")' in result.stdout
     assert "AssertionError: assert 2 == 3" in scripted_llm.prompts[1]
     assert len(parse_patch(target.read_text()).edits) == 2
+    assert "recommended patch: 2 files (+2 -2), tested on a copy" in result.stdout
+    assert (
+        f"skipped    your files were not changed; apply it later with 'healer apply {target}'"
+        in (result.stdout)
+    )
     assert (sample / "app" / "cfg.py").read_text() == original
 
 
 @pytest.mark.integration
+@pytest.mark.integration
+def test_run_applies_the_fix_to_the_workspace_when_accepted(
+    sample: Path, scripted_llm: ScriptedLLM
+) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "python -m pytest tests/test_app.py", "--path", str(sample)], input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert f"apply this patch to your files in {sample.resolve()}? [y/N]: y" in result.stdout
+    assert "applied    2 files changed in your workspace (+2 -2)" in result.stdout
+    assert 'return config.get("db")' in (sample / "app" / "cfg.py").read_text()
+    assert 'parse_port("2") == 2' in (sample / "tests" / "test_app.py").read_text()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("flag", "applied"), [("--apply", True), ("--no-apply", False)])
+def test_run_apply_flags_skip_the_question(
+    sample: Path, scripted_llm: ScriptedLLM, flag: str, applied: bool
+) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "python -m pytest tests/test_app.py", "--path", str(sample), flag]
+    )
+    assert result.exit_code == 0, result.output
+    assert "apply this patch" not in result.stdout
+    assert ("applied    2 files changed" in result.stdout) is applied
+    assert ('config.get("db")' in (sample / "app" / "cfg.py").read_text()) is applied
+
+
 def test_run_stops_at_the_attempt_limit(sample: Path, scripted_llm: ScriptedLLM) -> None:
     result = runner.invoke(
         cli.app,

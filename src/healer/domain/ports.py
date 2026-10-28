@@ -1,6 +1,6 @@
 """Interfaces the domain and services depend on. Adapters implement them."""
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -93,8 +93,14 @@ class CommandRunner(Protocol):
 
 
 class PatchApplier(Protocol):
-    def apply(self, patch: Patch, root: Path) -> AppliedPatch:
-        """Apply every edit under ``root`` or none of them."""
+    def apply(
+        self, patch: Patch, root: Path, *, expected: Mapping[str, str] | None = None
+    ) -> AppliedPatch:
+        """Apply every edit under ``root`` or none of them.
+
+        With ``expected`` (path to SHA-256), nothing is written unless each of those files
+        still has that content.
+        """
         ...
 
 

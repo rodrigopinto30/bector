@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -68,7 +68,9 @@ class FakeApplier:
     def __init__(self) -> None:
         self.calls: list[tuple[Patch, Path]] = []
 
-    def apply(self, patch: Patch, root: Path) -> AppliedPatch:
+    def apply(
+        self, patch: Patch, root: Path, *, expected: Mapping[str, str] | None = None
+    ) -> AppliedPatch:
         self.calls.append((patch, root))
         return AppliedPatch(files=patch.files, diff="+x\n", lines_added=1, lines_removed=0)
 

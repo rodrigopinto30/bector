@@ -1,9 +1,11 @@
+import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
 from healer.adapters.filesystem_patcher import FilesystemPatcher
-from healer.domain.errors import InvalidPatchError, PatchConflictError
+from healer.domain.errors import InvalidPatchError, PatchConflictError, WorkspaceError
 from healer.domain.patch import FileEdit, Patch
 
 CFG = 'def read_db(config):\n    return config["db"]\n\n\ndef port(value):\n    return int(value)\n'
@@ -145,3 +147,70 @@ def test_file_without_final_newline(root: Path) -> None:
     )
     assert (root / "app" / "tail.py").read_text() == "x = 2"
     assert (applied.lines_added, applied.lines_removed) == (1, 1)
+
+
+def test_reports_the_checksum_of_each_existing_file(root: Path) -> None:
+    applied = FilesystemPatcher().apply(
+        Patch(edits=(edit('config["db"]', "None"), edit("", "y = 1\n", path="app/new.py"))), root
+    )
+    assert applied.checksums == {"app/cfg.py": hashlib.sha256(CFG.encode()).hexdigest()}
+
+
+def test_applies_when_the_files_still_match_the_expected_checksums(root: Path) -> None:
+    patch = Patch(edits=(edit('config["db"]', "None"),))
+    expected = {"app/cfg.py": hashlib.sha256(CFG.encode()).hexdigest()}
+    FilesystemPatcher().apply(patch, root, expected=expected)
+    assert "return None" in (root / "app" / "cfg.py").read_text()
+
+
+def test_a_file_changed_since_it_was_tested_is_a_conflict(root: Path) -> None:
+    patch = Patch(edits=(edit('config["db"]', "None"), edit("x = 1", "x = 2", path="app/other.py")))
+    expected = {
+        "app/cfg.py": hashlib.sha256(CFG.encode()).hexdigest(),
+        "app/other.py": hashlib.sha256(b"x = 0\n").hexdigest(),
+    }
+    with pytest.raises(
+        PatchConflictError, match="app/other.py: changed since the patch was tested"
+    ):
+        FilesystemPatcher().apply(patch, root, expected=expected)
+    assert (root / "app" / "cfg.py").read_text() == CFG
+
+
+def test_a_file_deleted_since_it_was_tested_is_a_conflict(root: Path) -> None:
+    (root / "app" / "other.py").unlink()
+    expected = {"app/other.py": hashlib.sha256(b"x = 1\n").hexdigest()}
+    with pytest.raises(PatchConflictError, match="changed since the patch was tested"):
+        FilesystemPatcher().apply(
+            Patch(edits=(edit("x = 1", "x = 2", path="app/other.py"),)), root, expected=expected
+        )
+
+
+def test_a_failed_write_restores_the_files_already_written(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write = Path.write_text
+
+    def write_text(self: Path, data: str, *args: object, **kwargs: object) -> int:
+        if self.name == "other.py" and data != "x = 1\n":
+            raise PermissionError(13, "Permission denied")
+        return original_write(self, data, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    with pytest.raises(WorkspaceError, match="app/other.py: could not be written"):
+        apply(
+            root,
+            edit('config["db"]', "None"),
+            edit("", "y = 1\n", path="pkg/sub/new.py"),
+            edit("x = 1", "x = 2", path="app/other.py"),
+        )
+    assert (root / "app" / "cfg.py").read_text() == CFG
+    assert (root / "app" / "other.py").read_text() == "x = 1\n"
+    assert not (root / "pkg").exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="changing a file's owner needs root")
+def test_new_files_and_folders_get_the_owner_of_their_folder(root: Path) -> None:
+    os.chown(root, 1234, 1234)
+    apply(root, edit("", "y = 1\n", path="pkg/new.py"))
+    assert (root / "pkg").stat().st_uid == 1234
+    assert (root / "pkg" / "new.py").stat().st_gid == 1234

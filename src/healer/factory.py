@@ -29,6 +29,7 @@ from healer.domain.redaction import Redactor
 from healer.pipeline.repair import RepairPipeline
 from healer.services.code_index import CodeIndex
 from healer.services.diagnoser import Diagnoser
+from healer.services.fix_installer import FixInstaller
 from healer.services.fix_proposer import FixProposer
 from healer.services.sandbox_runner import SandboxRunner
 
@@ -74,10 +75,16 @@ def build_sandbox_runner(
     policy = CommandPolicy(settings.allowed_test_commands)
     diagnoser = build_diagnoser(workspace, settings, embedding_function)
     applier = FilesystemPatcher(max_changed_lines=settings.max_patch_changed_lines)
-    patch_policy = PatchPolicy(
-        max_files=settings.max_patch_files, max_bytes=settings.max_patch_bytes
-    )
-    return SandboxRunner(provider, runner, policy, diagnoser, applier, patch_policy)
+    return SandboxRunner(provider, runner, policy, diagnoser, applier, _patch_policy(settings))
+
+
+def build_fix_installer(workspace: Path, settings: Settings) -> FixInstaller:
+    applier = FilesystemPatcher(max_changed_lines=settings.max_patch_changed_lines)
+    return FixInstaller(workspace, applier, _patch_policy(settings))
+
+
+def _patch_policy(settings: Settings) -> PatchPolicy:
+    return PatchPolicy(max_files=settings.max_patch_files, max_bytes=settings.max_patch_bytes)
 
 
 def build_llm(settings: Settings) -> PatchProposer:
