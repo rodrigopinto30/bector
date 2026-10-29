@@ -46,6 +46,7 @@ class RepairState(TypedDict, total=False):
     status: RepairStatus
     detail: str
     stored: bool
+    solution: Solution
 
 
 class RepairListener(Protocol):
@@ -127,6 +128,7 @@ class RepairPipeline:
             target=state.get("target"),
             attempts=state["attempts"],
             stored=state.get("stored", False),
+            solution=state.get("solution"),
         )
         entry = ledger_entry(result, project=self._project, at=self._clock())
         if entry is not None:
@@ -187,7 +189,15 @@ class RepairPipeline:
             source=AttemptSource.CACHE,
             saved_tokens=solution.tokens_spent,
         )
-        if update.get("status") not in (RepairStatus.FIXED, RepairStatus.STOPPED):
+        if update.get("status") is RepairStatus.FIXED:
+            update["solution"] = solution.model_copy(
+                update={
+                    "command": state["command"],
+                    "exit_code_before": state["baseline"].result.exit_code,
+                    "verified_at": self._clock(),
+                }
+            )
+        elif update.get("status") is not RepairStatus.STOPPED:
             try:
                 self._solutions.remove(signature)
             except HealerError as exc:
@@ -239,8 +249,8 @@ class RepairPipeline:
             self._solutions.save(solution)
         except HealerError as exc:
             logger.warning("The solution could not be stored for reuse: %s", exc)
-            return {"stored": False}
-        return {"stored": True}
+            return {"stored": False, "solution": solution}
+        return {"stored": True, "solution": solution}
 
     def _try(
         self,

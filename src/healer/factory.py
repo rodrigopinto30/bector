@@ -12,6 +12,7 @@ from healer.adapters.anthropic_proposer import AnthropicProposer
 from healer.adapters.chroma_repository import ChromaSymbolRepository
 from healer.adapters.chroma_solutions import ChromaSolutionRepository
 from healer.adapters.filesystem_patcher import FilesystemPatcher
+from healer.adapters.mqtt_publisher import MqttPublisher
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sqlite_ledger import SqliteLedger
@@ -20,10 +21,10 @@ from healer.adapters.tempdir_sandbox import TempDirSandboxProvider
 from healer.adapters.workspace_paths import WorkspacePathResolver
 from healer.adapters.workspace_scanner import WorkspaceScanner
 from healer.config import Settings
-from healer.domain.errors import LLMError
+from healer.domain.errors import LLMError, SharingError
 from healer.domain.execution import CommandPolicy
 from healer.domain.patch import PatchPolicy
-from healer.domain.ports import PatchProposer
+from healer.domain.ports import PatchProposer, SolutionPublisher
 from healer.domain.proposal import Proposal
 from healer.domain.redaction import Redactor
 from healer.pipeline.repair import RepairPipeline
@@ -32,6 +33,7 @@ from healer.services.diagnoser import Diagnoser
 from healer.services.fix_installer import FixInstaller
 from healer.services.fix_proposer import FixProposer
 from healer.services.sandbox_runner import SandboxRunner
+from healer.services.solution_sharer import SolutionSharer
 
 
 def collection_name(root: Path, kind: str = "code") -> str:
@@ -163,6 +165,37 @@ def build_solutions(
 
 def build_ledger(settings: Settings) -> SqliteLedger:
     return SqliteLedger(settings.ledger_path)
+
+
+def build_publisher(settings: Settings) -> MqttPublisher:
+    password = settings.mqtt_password
+    return MqttPublisher(
+        host=settings.mqtt_host,
+        port=settings.mqtt_port,
+        topic=settings.mqtt_topic,
+        client_id=f"healer-{settings.node_id}",
+        username=settings.mqtt_username,
+        password=password.get_secret_value() if password is not None else None,
+        tls=settings.mqtt_tls,
+        ca_cert=settings.mqtt_ca_cert,
+        timeout_seconds=settings.mqtt_timeout_seconds,
+        max_retries=settings.mqtt_max_retries,
+    )
+
+
+def build_solution_sharer(
+    settings: Settings, publisher: SolutionPublisher | None = None
+) -> SolutionSharer:
+    key = settings.share_key
+    if key is None or not key.get_secret_value().strip():
+        raise SharingError("SHARE_KEY is not set: add the team key to .env to share solutions")
+    return SolutionSharer(
+        publisher or build_publisher(settings),
+        Redactor(),
+        node=settings.node_id,
+        key=key.get_secret_value().encode(),
+        max_bytes=settings.max_share_bytes,
+    )
 
 
 class _LazyProposer:

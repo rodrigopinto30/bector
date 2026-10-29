@@ -1,9 +1,10 @@
 """Typed settings loaded from environment variables."""
 
+import socket
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,17 @@ class Settings(BaseSettings):
     ledger_path: Path = Path(".healer/ledger.sqlite3")
     mqtt_host: str = "localhost"
     mqtt_port: int = 1883
+    mqtt_topic: str = "healer/solutions/v1"
+    mqtt_username: str | None = None
+    mqtt_password: SecretStr | None = None
+    mqtt_tls: bool = False
+    mqtt_ca_cert: Path | None = None
+    mqtt_timeout_seconds: float = 10.0
+    mqtt_max_retries: int = 2
+    share_solutions: bool = False
+    share_key: SecretStr | None = None
+    node_id: str = Field(default_factory=socket.gethostname)
+    max_share_bytes: int = 256_000
     test_command: str = "python -m pytest"
     allowed_test_commands: list[str] = ["pytest", "python -m pytest"]
     test_timeout_seconds: float = 300.0
