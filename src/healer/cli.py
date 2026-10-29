@@ -25,6 +25,7 @@ from healer.domain.repair import (
     RepairResult,
     RepairStatus,
 )
+from healer.domain.solution import Solution
 from healer.factory import (
     build_code_index,
     build_diagnoser,
@@ -33,7 +34,9 @@ from healer.factory import (
     build_ledger,
     build_repair_pipeline,
     build_sandbox_runner,
+    build_solution_sharer,
 )
+from healer.services.solution_sharer import MIN_KEY_LENGTH
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
 
@@ -62,9 +65,19 @@ def doctor() -> None:
     else:
         failed = True
         typer.echo("[fail] ANTHROPIC_API_KEY is not set")
-    host = os.environ.get("MQTT_HOST", "localhost")
-    port = os.environ.get("MQTT_PORT", "1883")
-    typer.echo(f"[info] MQTT broker: {host}:{port}")
+    settings = Settings()
+    typer.echo(f"[info] MQTT broker: {settings.mqtt_host}:{settings.mqtt_port}")
+    key = settings.share_key.get_secret_value().strip() if settings.share_key else ""
+    if not settings.share_solutions:
+        typer.echo("[info] sharing: off (set SHARE_SOLUTIONS=true to send accepted fixes)")
+    elif len(key) < MIN_KEY_LENGTH:
+        failed = True
+        typer.echo(
+            f"[fail] sharing is on, but SHARE_KEY is missing or shorter than "
+            f"{MIN_KEY_LENGTH} characters"
+        )
+    else:
+        typer.echo(f"[ok]   sharing: on, as node {settings.node_id} on {settings.mqtt_topic}")
     raise typer.Exit(code=1 if failed else 0)
 
 
@@ -388,6 +401,13 @@ def run(
         typer.Option("--cache/--no-cache", help="Try a stored solution before asking Claude"),
     ] = True,
     apply: ApplyOption = None,
+    share: Annotated[
+        bool | None,
+        typer.Option(
+            "--share/--no-share",
+            help="Send the fix to the team once applied; defaults to SHARE_SOLUTIONS",
+        ),
+    ] = None,
 ) -> None:
     """Run the tests on a copy and, if they fail, find a patch that makes them pass.
 
@@ -395,6 +415,7 @@ def run(
     Otherwise Claude is asked for patches, and told why the previous ones failed, until
     the tests pass or the attempt or token limit is reached. Each patch is tested on an
     isolated copy. The fix is then shown and applied to your files only if you accept it.
+    With sharing on, an applied fix is also sent to the team's other nodes.
     """
     settings = Settings()
     limit = attempts or settings.repair_max_attempts
@@ -415,8 +436,15 @@ def run(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     fix = _report_repair(result, save)
-    if fix is not None and fix.report is not None and fix.report.patch is not None:
-        _offer_fix(path, settings, fix.proposal.patch, fix.report.patch, apply=apply, saved=save)
+    if fix is None or fix.report is None or fix.report.patch is None:
+        return
+    applied = _offer_fix(
+        path, settings, fix.proposal.patch, fix.report.patch, apply=apply, saved=save
+    )
+    if applied and result.solution is not None:
+        _share(
+            settings, result.solution, enabled=settings.share_solutions if share is None else share
+        )
 
 
 class _RepairPrinter:
@@ -528,8 +556,8 @@ def _offer_fix(
     *,
     apply: bool | None,
     saved: Path | None,
-) -> None:
-    """Write the tested patch to the workspace if the developer accepts it."""
+) -> bool:
+    """Write the tested patch to the workspace if the developer accepts it; True if written."""
     try:
         installer = build_fix_installer(path, settings)
     except HealerError as exc:
@@ -545,7 +573,7 @@ def _offer_fix(
             else "save it with --save FILE to apply it later with 'healer apply FILE'"
         )
         typer.echo(f"skipped    your files were not changed; {later}")
-        return
+        return False
     try:
         applied = installer.install(patch, tested)
     except HealerError as exc:
@@ -554,6 +582,28 @@ def _offer_fix(
     typer.echo(
         f"applied    {_plural(len(applied.files), 'file')} changed in your workspace "
         f"(+{applied.lines_added} -{applied.lines_removed})"
+    )
+    return True
+
+
+def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
+    """Send an applied fix to the team. A failure is reported but never undoes the fix."""
+    if not enabled:
+        return
+    try:
+        sharer = build_solution_sharer(settings)
+        typer.echo(
+            f"sharing    sending the fix to the team through "
+            f"{settings.mqtt_host}:{settings.mqtt_port}..."
+        )
+        receipt = sharer.share(solution)
+    except HealerError as exc:
+        typer.echo(f"warning: the fix was applied but not shared: {exc}", err=True)
+        return
+    hidden = f", {_plural(receipt.hidden, 'secret')} hidden" if receipt.hidden else ""
+    typer.echo(
+        f"shared     sent to the team as node {receipt.solution.node} on "
+        f"{settings.mqtt_topic} ({receipt.size} bytes{hidden})"
     )
 
 

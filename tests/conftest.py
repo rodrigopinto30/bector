@@ -48,6 +48,18 @@ def isolated_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def no_sharing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test sends solutions to the real broker: sharing is off and the broker unreachable.
+
+    Tests that share build their own publisher.
+    """
+    monkeypatch.setenv("SHARE_SOLUTIONS", "false")
+    monkeypatch.delenv("SHARE_KEY", raising=False)
+    monkeypatch.setenv("MQTT_HOST", "127.0.0.1")
+    monkeypatch.setenv("MQTT_PORT", "1")
+
+
 @pytest.fixture
 def fake_embeddings() -> FakeEmbeddingFunction:
     return FakeEmbeddingFunction()

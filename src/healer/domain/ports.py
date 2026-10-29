@@ -136,3 +136,11 @@ class Ledger(Protocol):
     def entries(self, since: datetime | None = None) -> list[LedgerEntry]:
         """Return the entries recorded at or after ``since``, oldest first."""
         ...
+
+
+class SolutionPublisher(Protocol):
+    """Sends a sealed solution to the other nodes."""
+
+    def publish(self, message: bytes) -> None:
+        """Raise ``SharingError`` when the broker did not accept the message."""
+        ...

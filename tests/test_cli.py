@@ -16,6 +16,7 @@ from healer.factory import (
     build_fix_proposer,
     build_repair_pipeline,
     build_sandbox_runner,
+    build_solution_sharer,
 )
 from tests.conftest import FakeEmbeddingFunction
 
@@ -486,6 +487,98 @@ def test_run_apply_flags_skip_the_question(
     assert "apply this patch" not in result.stdout
     assert ("applied    2 files changed" in result.stdout) is applied
     assert ('config.get("db")' in (sample / "app" / "cfg.py").read_text()) is applied
+
+
+class FakePublisher:
+    def __init__(self) -> None:
+        self.messages: list[bytes] = []
+
+    def publish(self, message: bytes) -> None:
+        self.messages.append(message)
+
+
+@pytest.fixture
+def team(monkeypatch: pytest.MonkeyPatch) -> FakePublisher:
+    """Sharing on, with a team key and a fake broker."""
+    publisher = FakePublisher()
+    monkeypatch.setenv("SHARE_SOLUTIONS", "true")
+    monkeypatch.setenv("SHARE_KEY", "0123456789abcdef-team-key")
+    monkeypatch.setenv("NODE_ID", "laptop-ana")
+    monkeypatch.setattr(
+        cli, "build_solution_sharer", partial(build_solution_sharer, publisher=publisher)
+    )
+    return publisher
+
+
+@pytest.mark.integration
+def test_run_shares_an_applied_fix_with_the_team(
+    sample: Path, scripted_llm: ScriptedLLM, team: FakePublisher
+) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "python -m pytest tests/test_app.py", "--path", str(sample)], input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "sharing    sending the fix to the team through 127.0.0.1:1...\n" in result.stdout
+    assert "shared     sent to the team as node laptop-ana on healer/solutions/v1 (" in (
+        result.stdout
+    )
+    [message] = team.messages
+    body = json.loads(message)["solution"]
+    assert body["patch"]["edits"][0]["path"] == "app/cfg.py"
+    assert body["tokens_spent"] == 2040
+    assert body["evidence"]["command"] == "python -m pytest tests/test_app.py"
+    assert body["evidence"]["exit_code_before"] == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("flags", "answer"), [([], "n\n"), (["--no-share"], "y\n")])
+def test_run_does_not_share_a_declined_fix_or_with_no_share(
+    sample: Path, scripted_llm: ScriptedLLM, team: FakePublisher, flags: list[str], answer: str
+) -> None:
+    result = runner.invoke(
+        cli.app,
+        ["run", "python -m pytest tests/test_app.py", "--path", str(sample), *flags],
+        input=answer,
+    )
+    assert result.exit_code == 0, result.output
+    assert "shared" not in result.stdout
+    assert team.messages == []
+
+
+@pytest.mark.integration
+def test_a_sharing_failure_keeps_the_applied_fix(
+    sample: Path, scripted_llm: ScriptedLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MQTT_MAX_RETRIES", "0")
+    command = ["run", "python -m pytest tests/test_app.py", "--path", str(sample), "--apply"]
+    missing_key = runner.invoke(cli.app, [*command, "--share"])
+    assert missing_key.exit_code == 0, missing_key.output
+    assert "warning: the fix was applied but not shared: SHARE_KEY is not set" in (
+        missing_key.output
+    )
+    assert "sharing    sending" not in missing_key.output
+    assert 'config.get("db")' in (sample / "app" / "cfg.py").read_text()
+
+    shutil.copy(SAMPLE / "app" / "cfg.py", sample / "app" / "cfg.py")
+    shutil.copy(SAMPLE / "tests" / "test_app.py", sample / "tests" / "test_app.py")
+    monkeypatch.setenv("SHARE_KEY", "0123456789abcdef-team-key")
+    unreachable = runner.invoke(cli.app, [*command, "--share"])
+    assert unreachable.exit_code == 0, unreachable.output
+    assert "sharing    sending the fix to the team through 127.0.0.1:1..." in unreachable.stdout
+    assert "not shared: the broker at 127.0.0.1:1 could not be reached" in unreachable.output
+    assert "applied    2 files changed" in unreachable.stdout
+
+
+def test_doctor_reports_whether_sharing_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "[info] sharing: off" in runner.invoke(cli.app, ["doctor"]).stdout
+    monkeypatch.setenv("SHARE_SOLUTIONS", "true")
+    missing = runner.invoke(cli.app, ["doctor"])
+    assert missing.exit_code == 1
+    assert "[fail] sharing is on, but SHARE_KEY is missing" in missing.stdout
+    monkeypatch.setenv("SHARE_KEY", "0123456789abcdef-team-key")
+    monkeypatch.setenv("NODE_ID", "laptop-ana")
+    ready = runner.invoke(cli.app, ["doctor"])
+    assert "[ok]   sharing: on, as node laptop-ana on healer/solutions/v1" in ready.stdout
 
 
 def test_run_stops_at_the_attempt_limit(sample: Path, scripted_llm: ScriptedLLM) -> None:

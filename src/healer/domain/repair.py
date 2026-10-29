@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.execution import RunReport
 from healer.domain.proposal import Proposal, TokenUsage
+from healer.domain.solution import Solution
 
 _MAX_FAILURES = 3
 _OUTPUT_TAIL_CHARS = 2_000
@@ -90,6 +91,9 @@ class RepairResult(BaseModel):
     target: Diagnosis | None = Field(default=None, description="The error the loop tried to fix.")
     attempts: tuple[Attempt, ...] = ()
     stored: bool = Field(default=False, description="The fix was kept for reuse.")
+    solution: Solution | None = Field(
+        default=None, description="The fix with the evidence of this run, ready to be shared."
+    )
 
     @property
     def fix(self) -> Attempt | None:

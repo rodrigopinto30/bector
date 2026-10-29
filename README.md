@@ -241,7 +241,7 @@ spent      2 attempts, 2518 tokens in (870 from cache), 388 out
 - **Goal:** the whole test command passes, not only the targeted error. Use a narrower command (`python -m pytest tests/test_app.py::test_x`) to focus on one test.
 - **Limits** (7.6 of the plan): at most `REPAIR_MAX_ATTEMPTS` patches (default 3; `--attempts` overrides it) and `REPAIR_MAX_TOKENS` per run (default 100,000). The token check is made before each new attempt, assuming it will cost about as much as the last one.
 - **Wasted attempts are cheap:** a patch identical to an earlier one is not tested again, and a patch that does not fit the code is reported back to Claude without running the tests. Both still count as attempts.
-- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be applied later with `healer apply`, `--no-cache` skips stored solutions (a new fix is still stored), `--apply`/`--no-apply` apply the fix without asking or never.
+- `--error N` picks which diagnosed error to target, `--timeout` limits each test run, `--save` writes the working patch so it can be applied later with `healer apply`, `--no-cache` skips stored solutions (a new fix is still stored), `--apply`/`--no-apply` apply the fix without asking or never, `--share`/`--no-share` override `SHARE_SOLUTIONS` for one run.
 - **Exit codes:** `0` when the tests pass (already or with the patch), whether or not you apply it; `1` when no patch fixed them or the failure could not be diagnosed; `2` on configuration, API or command errors, or when an accepted patch could not be written.
 
 ## Local cache and token ledger: never pay twice for the same error
@@ -314,6 +314,34 @@ docker compose exec healer healer apply fix.json --yes    # apply without asking
 - **Your files stay yours.** Existing files are rewritten in place, so they keep their owner and permissions. New files and folders get the owner of the folder they are created in, so the container, which runs as root, leaves no root-owned files in your project.
 - Only the files of the patch are checked. If you changed other files after the test, the tests may behave differently; `healer apply` tests the patch again against the current code.
 - **Exit codes** of `healer apply`: `0` when the tests pass with the patch (applied or not), `1` when they still fail (nothing is written), `2` on invalid patches, patches that no longer fit the code, or write errors.
+
+## Sharing fixes with the team
+
+When sharing is on, a fix you accept in `healer run` is also sent to the team's other machines (nodes) through the MQTT broker, so nobody has to solve the same error again. It is off by default.
+
+```bash
+# .env, on every node of the team (same key everywhere)
+SHARE_SOLUTIONS=true
+SHARE_KEY=<python3 -c "import secrets; print(secrets.token_hex(32))">
+NODE_ID=laptop-ana
+```
+
+```text
+apply this patch to your files in /workspace? [y/N]: y
+applied    2 files changed in your workspace (+3 -2)
+sharing    sending the fix to the team through mosquitto:1883...
+shared     sent to the team as node laptop-ana on healer/solutions/v1 (... bytes)
+```
+
+`healer doctor` shows whether sharing is ready (`[ok]   sharing: on, as node laptop-ana on healer/solutions/v1`).
+
+- **Only after you accept.** Nothing is sent when you answer no, with `--no-apply`, or with `--no-share`. `healer apply` does not share: it has no proof that the tests failed without the patch.
+- **What is sent** (one JSON message, schema version 1): the error signature and its summary, the patch's edits, the explanation, the model, the tokens it cost, the node and the evidence: the command, its exit code without the patch, and that the tests passed with it. Never whole files.
+- **Secrets.** The summary, explanation and command are redacted first. If the patch itself contains something that looks like a secret, it is not shared at all, because masking it would break it.
+- **Signed.** Each message carries an HMAC-SHA256 of its content made with `SHARE_KEY` (at least 16 characters), so receivers can reject forged or altered messages.
+- **Delivery.** QoS 1 (the broker confirms it), `MQTT_TIMEOUT_SECONDS` per step (10) and `MQTT_MAX_RETRIES` retries with backoff (2). If the broker cannot be reached, a warning is printed; the fix stays applied and the exit code does not change. Messages larger than `MAX_SHARE_BYTES` (256,000) are not sent.
+- **Broker security.** The bundled Mosquitto accepts anonymous connections, which is only fine on a trusted local network. Elsewhere, set `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_TLS=true` and `MQTT_CA_CERT`, and give each node its own credentials and ACLs on the broker.
+- Receiving the messages, validating them and using them before asking Claude are the next parts of Phase 5.
 
 ## Redaction: hide secrets before anything leaves the machine
 

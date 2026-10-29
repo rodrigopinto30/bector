@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -381,6 +381,20 @@ def test_a_stored_solution_fixes_the_error_without_the_model() -> None:
     assert (entry.model_attempts, entry.usage.total, entry.tokens_saved) == (0, 0, 2_900)
 
 
+def test_a_replayed_solution_carries_the_evidence_of_this_run() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    stored = solution(FULL).model_copy(update={"verified_at": NOW - timedelta(days=3)})
+    result = build(runner, FakeProposer([]), solutions=FakeSolutions(stored)).run(
+        "python -m pytest tests/test_app.py"
+    )
+    assert result.solution is not None
+    assert (result.solution.command, result.solution.verified_at) == (
+        "python -m pytest tests/test_app.py",
+        NOW,
+    )
+    assert result.solution.patch == FULL and result.solution.tokens_spent == 2_900
+
+
 def test_a_stale_solution_is_discarded_and_the_model_is_asked() -> None:
     runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
     solutions = FakeSolutions(solution(PARTIAL))
@@ -409,6 +423,7 @@ def test_a_fix_from_the_model_is_stored_with_its_evidence_and_cost() -> None:
         1,
         NOW,
     )
+    assert result.solution == stored
     [entry] = ledger.recorded
     assert entry.resolution is Resolution.MODEL
     assert (entry.model_attempts, entry.usage.total, entry.tokens_saved) == (2, 2_000, 0)
@@ -428,7 +443,7 @@ def test_without_the_cache_a_stored_solution_is_not_tried_but_replaced() -> None
 
 def test_an_unresolved_incident_is_recorded_without_storing_anything() -> None:
     solutions, ledger = FakeSolutions(), FakeLedger()
-    build(
+    result = build(
         FakeRunner(report(KEY_ERROR)),
         FakeProposer([PARTIAL]),
         attempts=1,
@@ -436,6 +451,7 @@ def test_an_unresolved_incident_is_recorded_without_storing_anything() -> None:
         ledger=ledger,
     ).run("python -m pytest")
     assert solutions.stored == {}
+    assert result.solution is None
     [entry] = ledger.recorded
     assert entry.resolution is Resolution.NONE and entry.status is RepairStatus.OUT_OF_ATTEMPTS
 
@@ -459,6 +475,7 @@ def test_storage_failures_do_not_hide_the_fix() -> None:
     ).run("python -m pytest")
     assert result.status is RepairStatus.FIXED
     assert result.stored is False
+    assert result.solution is not None and result.solution.patch == FULL
 
 
 def test_a_sandbox_failure_while_replaying_keeps_the_stored_solution() -> None:

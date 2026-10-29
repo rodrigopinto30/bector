@@ -60,3 +60,8 @@ class MissingContextError(HealerError):
 
 class LedgerError(HealerError):
     """The token ledger could not be read or written."""
+
+
+class SharingError(HealerError):
+    """A solution could not be shared: sharing is misconfigured, the patch holds a secret,
+    the message is too large, or the broker could not be reached."""
