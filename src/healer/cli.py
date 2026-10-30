@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import signal
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -12,7 +13,7 @@ from healer import __version__
 from healer.adapters.log_reader import read_log
 from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
-from healer.domain.errors import HealerError
+from healer.domain.errors import HealerError, RejectedMessageError
 from healer.domain.execution import RunReport
 from healer.domain.ledger import LedgerSummary, summarize, total
 from healer.domain.patch import AppliedPatch, Patch, parse_patch
@@ -25,6 +26,7 @@ from healer.domain.repair import (
     RepairResult,
     RepairStatus,
 )
+from healer.domain.sharing import MIN_KEY_LENGTH, Ingested, IngestOutcome
 from healer.domain.solution import Solution
 from healer.factory import (
     build_code_index,
@@ -34,9 +36,11 @@ from healer.factory import (
     build_ledger,
     build_repair_pipeline,
     build_sandbox_runner,
+    build_solution_ingester,
     build_solution_sharer,
+    build_subscriber,
+    build_team_solutions,
 )
-from healer.services.solution_sharer import MIN_KEY_LENGTH
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
 
@@ -808,9 +812,91 @@ def redact(
 
 @app.command()
 def listen() -> None:
-    """Start the MQTT listener that syncs shared solutions (Phase 5)."""
-    typer.echo("Not implemented yet.")
-    raise typer.Exit(code=1)
+    """Receive the fixes the team shares and keep them as suggestions, until stopped.
+
+    Each message must carry a valid team signature, follow the expected format and hold a
+    safe patch; anything else is refused. Nothing is ever applied or run. A node with a
+    fixed NODE_ID also receives what was sent while it was off.
+    """
+    settings = Settings()
+    try:
+        ingester = build_solution_ingester(settings)
+        subscriber = build_subscriber(settings)
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if "node_id" not in settings.model_fields_set:
+        typer.echo(
+            "warning: NODE_ID is not set; what is sent while this node is off may be lost",
+            err=True,
+        )
+    typer.echo(f"listening  as node {settings.node_id} on {settings.mqtt_topic}; stop with Ctrl+C")
+
+    def on_message(data: bytes) -> None:
+        try:
+            typer.echo(_ingested_line(ingester.ingest(data)))
+        except RejectedMessageError as exc:
+            typer.echo(f"rejected   {_printable(str(exc))}")
+        except HealerError as exc:
+            typer.echo(f"warning: a valid message could not be stored: {exc}", err=True)
+
+    previous = signal.signal(signal.SIGTERM, _interrupt)
+    try:
+        subscriber.run(on_message, lambda status: typer.echo(f"broker     {status}"))
+    except KeyboardInterrupt:
+        typer.echo("stopped")
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _interrupt(*_: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _ingested_line(ingested: Ingested) -> str:
+    solution = ingested.solution
+    summary = (
+        f"{_printable(solution.error)} from {_printable(solution.node)} "
+        f"({_plural(len(solution.patch.files), 'file')})"
+    )
+    if ingested.outcome is IngestOutcome.NEW:
+        return f"received   {summary}, kept as a suggestion"
+    if ingested.outcome is IngestOutcome.REPLACED:
+        return f"updated    {summary}, replaces the older suggestion"
+    if ingested.outcome is IngestOutcome.DUPLICATE:
+        return f"ignored    {summary}: already known"
+    if ingested.outcome is IngestOutcome.OLDER:
+        return f"ignored    {summary}: older than the suggestion kept"
+    return "ignored    sent by this node"
+
+
+def _printable(text: str) -> str:
+    """Text from other nodes without control characters, which could fool the terminal."""
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
+@app.command()
+def team() -> None:
+    """Show the fixes received from the team. They are suggestions: none is applied."""
+    try:
+        suggestions = build_team_solutions(Settings()).all()
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not suggestions:
+        typer.echo("no suggestions yet; 'healer listen' receives them")
+        return
+    typer.echo(f"{_plural(len(suggestions), 'suggestion')} from the team, newest first")
+    for received in suggestions:
+        solution = received.solution
+        typer.echo("")
+        typer.echo(f"{received.received_at:%Y-%m-%d %H:%M}  from {_printable(solution.node)}")
+        typer.echo(f"error      {_printable(solution.error)}")
+        typer.echo(f"files      {_printable(', '.join(solution.patch.files))}")
+        typer.echo(f"evidence   {_printable(solution.evidence.command)}")
 
 
 if __name__ == "__main__":

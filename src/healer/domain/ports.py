@@ -1,6 +1,6 @@
 """Interfaces the domain and services depend on. Adapters implement them."""
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +11,7 @@ from healer.domain.ledger import LedgerEntry
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
 from healer.domain.proposal import Proposal
+from healer.domain.sharing import ReceivedSolution
 from healer.domain.solution import Solution
 
 
@@ -143,4 +144,31 @@ class SolutionPublisher(Protocol):
 
     def publish(self, message: bytes) -> None:
         """Raise ``SharingError`` when the broker did not accept the message."""
+        ...
+
+
+class SolutionSubscriber(Protocol):
+    """Receives the messages other nodes publish."""
+
+    def run(self, on_message: Callable[[bytes], None], on_status: Callable[[str], None]) -> None:
+        """Deliver messages until ``stop`` is called.
+
+        Raise ``SharingError`` when the broker refuses this node.
+        """
+        ...
+
+    def stop(self) -> None: ...
+
+
+class TeamSolutionRepository(Protocol):
+    """Suggestions received from other nodes, one per error signature."""
+
+    def find(self, signature: str) -> ReceivedSolution | None: ...
+
+    def save(self, received: ReceivedSolution) -> None:
+        """Store ``received``, replacing any earlier one for the same signature."""
+        ...
+
+    def all(self) -> list[ReceivedSolution]:
+        """Return every suggestion, the most recently received first."""
         ...

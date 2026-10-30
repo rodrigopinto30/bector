@@ -11,8 +11,8 @@ fi
 
 if [ "${1:-}" = "--clean" ]; then
   echo "[stop] Stopping services and removing volumes..."
-  $DOCKER compose down -v
+  $DOCKER compose --profile team down -v
 else
   echo "[stop] Stopping services..."
-  $DOCKER compose down
+  $DOCKER compose --profile team down
 fi
