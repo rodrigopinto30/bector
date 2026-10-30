@@ -59,7 +59,8 @@ To stop everything:
 | Service | Container | Purpose |
 | --- | --- | --- |
 | `healer` | `healer-app` | The application and CLI. |
-| `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines (used from Phase 5). |
+| `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. |
+| `listener` | `healer-listener` | Optional. Runs `healer listen` in the background; it only starts with the `team` profile. |
 
 The project you want to analyze goes in the `workspace/` folder, which is mounted at `/workspace` inside the container. To use another folder, set `WORKSPACE_PATH` in `.env`.
 
@@ -341,7 +342,41 @@ shared     sent to the team as node laptop-ana on healer/solutions/v1 (... bytes
 - **Signed.** Each message carries an HMAC-SHA256 of its content made with `SHARE_KEY` (at least 16 characters), so receivers can reject forged or altered messages.
 - **Delivery.** QoS 1 (the broker confirms it), `MQTT_TIMEOUT_SECONDS` per step (10) and `MQTT_MAX_RETRIES` retries with backoff (2). If the broker cannot be reached, a warning is printed; the fix stays applied and the exit code does not change. Messages larger than `MAX_SHARE_BYTES` (256,000) are not sent.
 - **Broker security.** The bundled Mosquitto accepts anonymous connections, which is only fine on a trusted local network. Elsewhere, set `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_TLS=true` and `MQTT_CA_CERT`, and give each node its own credentials and ACLs on the broker.
-- Receiving the messages, validating them and using them before asking Claude are the next parts of Phase 5.
+
+## Receiving fixes from the team
+
+`healer listen` receives what the other nodes share and keeps it as **suggestions**. It never applies or runs anything. It needs the same `SHARE_KEY` as the team and its own fixed `NODE_ID`; `SHARE_SOLUTIONS` only controls sending.
+
+```bash
+docker compose --profile team up -d listener      # keep it running in the background
+docker compose logs -f listener                   # see what arrives
+docker compose exec healer healer team            # list the suggestions
+```
+
+```text
+listening  as node laptop-luis on healer/solutions/v1; stop with Ctrl+C
+broker     connected to mosquitto:1883
+received   KeyError: 'db' from laptop-ana (2 files), kept as a suggestion
+ignored    KeyError: 'db' from laptop-ana (2 files): already known
+rejected   the signature does not match: forged or altered message
+rejected   the patch is not safe: Path '../../etc/passwd' is outside the project
+```
+
+```text
+1 suggestion from the team, newest first
+
+2026-10-30 10:52  from laptop-ana
+error      KeyError: 'db'
+files      app/cfg.py, app/net.py
+evidence   python -m pytest
+```
+
+- **Every message is untrusted.** In order: the size (`MAX_SHARE_BYTES`), the HMAC signature, the schema, that the evidence shows the tests failing before the patch, and that the patch follows the same rules as any other (paths inside the project, protected folders, size limits). A message that fails any check is refused and not stored.
+- **One suggestion per error signature** (ingestion is idempotent). The same patch again changes nothing, a newer patch replaces the older one, an older patch never replaces a newer one, and a node ignores its own messages. Each suggestion keeps its origin node and times.
+- **Nothing is lost while the node is off.** With a fixed `NODE_ID`, the broker keeps what is published after the node's first connection and delivers it on the next one. Without `NODE_ID`, the name changes when the container is recreated, and a warning says so.
+- **It stays connected.** Lost connections are retried with growing delays (up to 60 seconds). A broker that refuses the node ends the command with exit code `2`. `Ctrl+C` or `docker stop` shut it down cleanly.
+- Run only one listener per `NODE_ID`: the broker allows one connection per name.
+- Suggestions live in a Chroma collection of this node, shared by all its workspaces. Testing them and using them before asking Claude is the next part of Phase 5.
 
 ## Redaction: hide secrets before anything leaves the machine
 
