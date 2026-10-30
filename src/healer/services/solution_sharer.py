@@ -7,10 +7,8 @@ from healer.domain.errors import SharingError
 from healer.domain.patch import Patch
 from healer.domain.ports import SolutionPublisher
 from healer.domain.redaction import Redactor
-from healer.domain.sharing import Evidence, SharedSolution, ShareReceipt, seal
+from healer.domain.sharing import Evidence, SharedSolution, ShareReceipt, check_key, seal
 from healer.domain.solution import Solution
-
-MIN_KEY_LENGTH = 16
 
 
 class SolutionSharer:
@@ -33,8 +31,7 @@ class SolutionSharer:
         max_bytes: int,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        if len(key) < MIN_KEY_LENGTH:
-            raise SharingError(f"the team key must have at least {MIN_KEY_LENGTH} characters")
+        check_key(key)
         self._publisher = publisher
         self._redactor = redactor
         self._node = node

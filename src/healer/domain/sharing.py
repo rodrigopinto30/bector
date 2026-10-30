@@ -1,16 +1,19 @@
-"""The message a node publishes when its developer accepts a verified fix (4.2, 6.2)."""
+"""The message nodes exchange when a developer accepts a verified fix (4.2, 6.2)."""
 
 import hashlib
 import hmac
 import json
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from healer.domain.errors import RejectedMessageError, SharingError
 from healer.domain.patch import Patch
 
 SCHEMA_VERSION: Literal[1] = 1
+MIN_KEY_LENGTH = 16
 
 
 class Evidence(BaseModel):
@@ -50,11 +53,72 @@ class ShareReceipt(BaseModel):
     hidden: int = Field(description="Secrets masked in the error, explanation and command.")
 
 
+class ReceivedSolution(BaseModel):
+    """A solution from another node, kept as a suggestion. It is never applied on its own."""
+
+    model_config = ConfigDict(frozen=True)
+
+    solution: SharedSolution
+    received_at: datetime
+
+
+class IngestOutcome(StrEnum):
+    NEW = "new"
+    REPLACED = "replaced"
+    DUPLICATE = "duplicate"
+    OLDER = "older"
+    OWN = "own"
+
+
+class Ingested(BaseModel):
+    """What happened to a valid message."""
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: IngestOutcome
+    solution: SharedSolution
+
+
+def check_key(key: bytes) -> None:
+    if len(key) < MIN_KEY_LENGTH:
+        raise SharingError(f"the team key must have at least {MIN_KEY_LENGTH} characters")
+
+
 def seal(solution: SharedSolution, key: bytes) -> bytes:
     """The message as sent: the solution plus an HMAC-SHA256 of its canonical JSON."""
     body = solution.model_dump(mode="json")
     mac = hmac.new(key, canonical_json(body), hashlib.sha256).hexdigest()
     return canonical_json({"mac": mac, "solution": body})
+
+
+def unseal(data: bytes, key: bytes, *, max_bytes: int) -> SharedSolution:
+    """Read a received message, or raise ``RejectedMessageError``.
+
+    Everything from the network is untrusted (7.5). The size comes first and the signature
+    second, so a message without the team key never reaches the schema.
+    """
+    if len(data) > max_bytes:
+        raise RejectedMessageError(f"the message is {len(data)} bytes; the limit is {max_bytes}")
+    try:
+        message = json.loads(data)
+        if not isinstance(message, dict) or set(message) != {"mac", "solution"}:
+            raise RejectedMessageError("the message is not a signed solution")
+        mac = message["mac"]
+        if not isinstance(mac, str):
+            raise RejectedMessageError("the message is not a signed solution")
+        expected = hmac.new(key, canonical_json(message["solution"]), hashlib.sha256).hexdigest()
+        valid = hmac.compare_digest(mac.encode(), expected.encode())
+    except (ValueError, RecursionError) as exc:
+        raise RejectedMessageError("the message is not valid JSON") from exc
+    if not valid:
+        raise RejectedMessageError("the signature does not match: forged or altered message")
+    try:
+        return SharedSolution.model_validate(message["solution"])
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in error['loc'])}: {error['msg']}" for error in exc.errors()
+        )
+        raise RejectedMessageError(f"the solution has an invalid format: {problems}") from exc
 
 
 def canonical_json(value: Any) -> bytes:

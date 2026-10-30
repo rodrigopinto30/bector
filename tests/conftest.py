@@ -56,6 +56,7 @@ def no_sharing(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("SHARE_SOLUTIONS", "false")
     monkeypatch.delenv("SHARE_KEY", raising=False)
+    monkeypatch.delenv("NODE_ID", raising=False)
     monkeypatch.setenv("MQTT_HOST", "127.0.0.1")
     monkeypatch.setenv("MQTT_PORT", "1")
 

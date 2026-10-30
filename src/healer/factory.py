@@ -11,8 +11,10 @@ from chromadb.api.types import EmbeddingFunction
 from healer.adapters.anthropic_proposer import AnthropicProposer
 from healer.adapters.chroma_repository import ChromaSymbolRepository
 from healer.adapters.chroma_solutions import ChromaSolutionRepository
+from healer.adapters.chroma_team_solutions import ChromaTeamSolutions
 from healer.adapters.filesystem_patcher import FilesystemPatcher
 from healer.adapters.mqtt_publisher import MqttPublisher
+from healer.adapters.mqtt_subscriber import MqttSubscriber
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sqlite_ledger import SqliteLedger
@@ -33,6 +35,7 @@ from healer.services.diagnoser import Diagnoser
 from healer.services.fix_installer import FixInstaller
 from healer.services.fix_proposer import FixProposer
 from healer.services.sandbox_runner import SandboxRunner
+from healer.services.solution_ingester import SolutionIngester
 from healer.services.solution_sharer import SolutionSharer
 
 
@@ -186,16 +189,54 @@ def build_publisher(settings: Settings) -> MqttPublisher:
 def build_solution_sharer(
     settings: Settings, publisher: SolutionPublisher | None = None
 ) -> SolutionSharer:
-    key = settings.share_key
-    if key is None or not key.get_secret_value().strip():
-        raise SharingError("SHARE_KEY is not set: add the team key to .env to share solutions")
     return SolutionSharer(
         publisher or build_publisher(settings),
         Redactor(),
         node=settings.node_id,
-        key=key.get_secret_value().encode(),
+        key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
     )
+
+
+def build_subscriber(settings: Settings) -> MqttSubscriber:
+    password = settings.mqtt_password
+    return MqttSubscriber(
+        host=settings.mqtt_host,
+        port=settings.mqtt_port,
+        topic=settings.mqtt_topic,
+        client_id=f"healer-listener-{settings.node_id}",
+        username=settings.mqtt_username,
+        password=password.get_secret_value() if password is not None else None,
+        tls=settings.mqtt_tls,
+        ca_cert=settings.mqtt_ca_cert,
+    )
+
+
+def build_team_solutions(
+    settings: Settings, embedding_function: EmbeddingFunction[Any] | None = None
+) -> ChromaTeamSolutions:
+    client = chromadb.PersistentClient(path=str(settings.chroma_path))
+    name = "team-" + hashlib.sha256(settings.mqtt_topic.encode()).hexdigest()[:16]
+    return ChromaTeamSolutions(client, name, embedding_function)
+
+
+def build_solution_ingester(
+    settings: Settings, embedding_function: EmbeddingFunction[Any] | None = None
+) -> SolutionIngester:
+    return SolutionIngester(
+        build_team_solutions(settings, embedding_function),
+        _patch_policy(settings),
+        node=settings.node_id,
+        key=_team_key(settings),
+        max_bytes=settings.max_share_bytes,
+    )
+
+
+def _team_key(settings: Settings) -> bytes:
+    key = settings.share_key
+    if key is None or not key.get_secret_value().strip():
+        raise SharingError("SHARE_KEY is not set: add the team key to .env to share solutions")
+    return key.get_secret_value().encode()
 
 
 class _LazyProposer:

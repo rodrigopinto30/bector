@@ -1,5 +1,8 @@
 import json
 import shutil
+import signal
+from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
@@ -8,15 +11,19 @@ from typer.testing import CliRunner
 
 from healer import cli
 from healer.config import Settings
+from healer.domain.errors import SharingError
 from healer.domain.patch import FileEdit, Patch, parse_patch
 from healer.domain.proposal import Proposal, TokenUsage
+from healer.domain.sharing import Evidence, SharedSolution, seal
 from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
     build_repair_pipeline,
     build_sandbox_runner,
+    build_solution_ingester,
     build_solution_sharer,
+    build_team_solutions,
 )
 from tests.conftest import FakeEmbeddingFunction
 
@@ -579,6 +586,141 @@ def test_doctor_reports_whether_sharing_is_ready(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("NODE_ID", "laptop-ana")
     ready = runner.invoke(cli.app, ["doctor"])
     assert "[ok]   sharing: on, as node laptop-ana on healer/solutions/v1" in ready.stdout
+
+
+TEAM_KEY = "0123456789abcdef-team-key"
+
+
+def team_message(error: str = "KeyError: 'db'", key: str = TEAM_KEY) -> bytes:
+    at = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
+    solution = SharedSolution(
+        node="laptop-ana",
+        published_at=at,
+        signature="a" * 64,
+        error=error,
+        patch=Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new='c.get("db")'),)),
+        explanation="Use a default.",
+        model="claude-sonnet-5-5",
+        tokens_spent=2_900,
+        evidence=Evidence(command="python -m pytest", exit_code_before=1, verified_at=at),
+    )
+    return seal(solution, key.encode())
+
+
+class FakeSubscriber:
+    """Delivers the messages it was given, then ends as the real one would."""
+
+    def __init__(self, *messages: bytes, ending: BaseException | None = None) -> None:
+        self.messages = messages
+        self.ending = ending
+
+    def run(self, on_message: Callable[[bytes], None], on_status: Callable[[str], None]) -> None:
+        on_status("connected to the broker")
+        for message in self.messages:
+            on_message(message)
+        if self.ending is not None:
+            raise self.ending
+
+    def stop(self) -> None:
+        pass
+
+
+@pytest.fixture
+def team_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """A node with the team key; call it with the subscriber ``healer listen`` should use."""
+    fake = FakeEmbeddingFunction()
+    monkeypatch.setenv("CHROMA_PATH", str(tmp_path / "chroma"))
+    monkeypatch.setenv("SHARE_KEY", TEAM_KEY)
+    monkeypatch.setenv("NODE_ID", "laptop-luis")
+    monkeypatch.setattr(
+        cli, "build_solution_ingester", partial(build_solution_ingester, embedding_function=fake)
+    )
+    monkeypatch.setattr(
+        cli, "build_team_solutions", partial(build_team_solutions, embedding_function=fake)
+    )
+
+    def use(subscriber: FakeSubscriber) -> None:
+        monkeypatch.setattr(cli, "build_subscriber", lambda _: subscriber)
+
+    return use
+
+
+def test_listen_keeps_valid_messages_and_refuses_the_rest(team_node: Callable[..., None]) -> None:
+    team_node(
+        FakeSubscriber(
+            team_message(),
+            team_message(),
+            team_message(key="a-key-that-is-not-the-team-key"),
+            b"not json",
+            ending=KeyboardInterrupt(),
+        )
+    )
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    assert "listening  as node laptop-luis on healer/solutions/v1; stop with Ctrl+C" in (
+        result.stdout
+    )
+    assert "broker     connected to the broker" in result.stdout
+    assert "received   KeyError: 'db' from laptop-ana (1 file), kept as a suggestion" in (
+        result.stdout
+    )
+    assert "ignored    KeyError: 'db' from laptop-ana (1 file): already known" in result.stdout
+    assert "rejected   the signature does not match: forged or altered message" in result.stdout
+    assert "rejected   the message is not valid JSON" in result.stdout
+    assert result.stdout.rstrip().endswith("stopped")
+    assert signal.getsignal(signal.SIGTERM) is not cli._interrupt
+
+    shown = runner.invoke(cli.app, ["team"])
+    assert shown.exit_code == 0, shown.output
+    assert "1 suggestion from the team, newest first" in shown.stdout
+    assert "from laptop-ana" in shown.stdout
+    assert "error      KeyError: 'db'" in shown.stdout
+    assert "files      app/cfg.py" in shown.stdout
+    assert "evidence   python -m pytest" in shown.stdout
+
+
+def test_text_from_other_nodes_cannot_control_the_terminal(
+    team_node: Callable[..., None],
+) -> None:
+    team_node(FakeSubscriber(team_message(error="KeyError: \x1b[2Jfake\nverdict    fixed")))
+    received = runner.invoke(cli.app, ["listen"])
+    shown = runner.invoke(cli.app, ["team"])
+    for output in (received.stdout, shown.stdout):
+        assert "\x1b" not in output
+        assert "?[2Jfake?verdict    fixed" in output
+
+
+def test_listen_without_the_team_key_explains_what_to_do(
+    team_node: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SHARE_KEY")
+    team_node(FakeSubscriber())
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 2
+    assert "SHARE_KEY is not set" in result.output
+
+
+def test_listen_warns_when_the_node_has_no_fixed_name(
+    team_node: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("NODE_ID")
+    team_node(FakeSubscriber())
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    assert "warning: NODE_ID is not set" in result.output
+
+
+def test_listen_reports_a_broker_that_refuses_the_node(team_node: Callable[..., None]) -> None:
+    team_node(FakeSubscriber(ending=SharingError("the broker refused the connection: no")))
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 2
+    assert "error: the broker refused the connection: no" in result.output
+
+
+def test_team_without_suggestions(team_node: Callable[..., None]) -> None:
+    result = runner.invoke(cli.app, ["team"])
+    assert result.exit_code == 0, result.output
+    assert "no suggestions yet" in result.stdout
 
 
 def test_run_stops_at_the_attempt_limit(sample: Path, scripted_llm: ScriptedLLM) -> None:
