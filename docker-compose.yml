@@ -28,9 +28,9 @@ services:
       - mosquitto-data:/mosquitto/data
     restart: unless-stopped
 
-  healer:
+  cli:
     <<: *healer
-    container_name: healer-app
+    container_name: healer-cli
 
   listener:
     <<: *healer
