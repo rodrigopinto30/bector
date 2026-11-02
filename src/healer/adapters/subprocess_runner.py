@@ -20,8 +20,10 @@ SAFE_ENV_NAMES = frozenset({"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", 
 class SubprocessRunner:
     """Runs a command in its own process group so a timeout also kills its children.
 
-    The child only sees a minimal environment: credentials such as ``ANTHROPIC_API_KEY``
-    never reach the code under test.
+    The child gets a minimal environment, so credentials such as ``ANTHROPIC_API_KEY`` are
+    not handed to the code under test. This is not a security boundary: that code runs as
+    the same user and can still read what this user can, including this process's
+    environment through ``/proc``.
     """
 
     def __init__(

@@ -37,6 +37,7 @@ from healer.services.fix_proposer import FixProposer
 from healer.services.sandbox_runner import SandboxRunner
 from healer.services.solution_ingester import SolutionIngester
 from healer.services.solution_sharer import SolutionSharer
+from healer.services.suggestion_finder import SuggestionFinder
 
 
 def collection_name(root: Path, kind: str = "code") -> str:
@@ -150,6 +151,7 @@ def build_repair_pipeline(
         proposer,
         build_solutions(workspace, settings, embedding_function),
         build_ledger(settings),
+        suggestions=build_suggestion_finder(settings, embedding_function),
         project=str(root),
         max_attempts=max_attempts or settings.repair_max_attempts,
         max_tokens=settings.repair_max_tokens,
@@ -218,6 +220,16 @@ def build_team_solutions(
     client = chromadb.PersistentClient(path=str(settings.chroma_path))
     name = "team-" + hashlib.sha256(settings.mqtt_topic.encode()).hexdigest()[:16]
     return ChromaTeamSolutions(client, name, embedding_function)
+
+
+def build_suggestion_finder(
+    settings: Settings, embedding_function: EmbeddingFunction[Any] | None = None
+) -> SuggestionFinder:
+    return SuggestionFinder(
+        build_team_solutions(settings, embedding_function),
+        max_distance=settings.team_max_distance,
+        max_matches=settings.team_max_suggestions,
+    )
 
 
 def build_solution_ingester(

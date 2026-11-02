@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from healer.domain.errors import RejectedMessageError, SharingError
 from healer.domain.patch import Patch
+from healer.domain.proposal import Proposal, TokenUsage
 
 SCHEMA_VERSION: Literal[1] = 1
 MIN_KEY_LENGTH = 16
@@ -44,6 +45,15 @@ class SharedSolution(BaseModel):
     tokens_spent: int = Field(ge=0)
     evidence: Evidence
 
+    def as_proposal(self) -> Proposal:
+        """The solution as a free proposal, so it can be tried like any other."""
+        return Proposal(
+            patch=self.patch,
+            explanation=self.explanation,
+            model=self.model,
+            usage=TokenUsage(input_tokens=0, output_tokens=0),
+        )
+
 
 class ShareReceipt(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -60,6 +70,19 @@ class ReceivedSolution(BaseModel):
 
     solution: SharedSolution
     received_at: datetime
+
+
+class TeamMatch(BaseModel):
+    """A suggestion found for an error."""
+
+    model_config = ConfigDict(frozen=True)
+
+    received: ReceivedSolution
+    distance: float = Field(description="Cosine distance between the two error summaries.")
+    same_signature: bool = Field(
+        default=False,
+        description="Both errors have the same signature, which ignores concrete values.",
+    )
 
 
 class IngestOutcome(StrEnum):

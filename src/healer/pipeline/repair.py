@@ -1,4 +1,7 @@
-"""The self-correction loop as a LangGraph state graph: reproduce, recall, propose, test."""
+"""The self-correction loop as a LangGraph state graph.
+
+Reproduce, recall, consult the team, propose, test.
+"""
 
 import logging
 from collections.abc import Callable
@@ -26,11 +29,15 @@ from healer.domain.repair import (
     RepairResult,
     RepairStatus,
 )
+from healer.domain.sharing import TeamMatch
 from healer.domain.solution import Solution
 from healer.services.fix_proposer import FixProposer
 from healer.services.sandbox_runner import SandboxRunner
+from healer.services.suggestion_finder import SuggestionFinder
 
 logger = logging.getLogger(__name__)
+
+ApproveSuggestion = Callable[[TeamMatch], bool]
 
 
 class RepairState(TypedDict, total=False):
@@ -61,13 +68,20 @@ class RepairPipeline:
     """Runs the tests, then looks for a fix until one makes them pass or a limit is hit.
 
     The cheapest source goes first (6.1): a solution this workspace already verified for
-    the same error signature, replayed for free. If there is none, or it no longer works,
-    the model is asked for patches. Every patch is tried on a fresh copy of the original
-    code, never on top of an earlier attempt, and the model sees what went wrong with the
-    previous ones. The loop stops after ``max_attempts`` model attempts, or before one
-    that would likely push the tokens spent past ``max_tokens`` (estimated from the last
-    attempt). A patch from the model that works is kept for next time, and every
-    incident is recorded in the ledger. The real workspace is never written.
+    the same error signature, replayed for free. Next come the team's suggestions, each
+    one only if the developer approves it, because testing a patch runs its code. If
+    none of them works, the model is asked for patches. Every patch is tried on a fresh
+    copy of the original code, never on top of an earlier attempt, and the model sees
+    what went wrong with the previous ones, except the team's: their text comes from the
+    network and is never sent to the model. The loop stops after ``max_attempts`` model
+    attempts, or before one that would likely push the tokens spent past ``max_tokens``
+    (estimated from the last attempt). A patch from the model that works is kept for next
+    time, and every incident is recorded in the ledger. The real workspace is never
+    written.
+
+    A team suggestion that fails is only skipped: it belongs to the node, not to this
+    workspace, so it may still be right for another project. One that works is not stored
+    or offered for sharing, because the team already has it.
     """
 
     def __init__(
@@ -77,6 +91,7 @@ class RepairPipeline:
         solutions: SolutionRepository,
         ledger: Ledger,
         *,
+        suggestions: SuggestionFinder,
         project: str,
         max_attempts: int,
         max_tokens: int,
@@ -86,11 +101,13 @@ class RepairPipeline:
         self._proposer = proposer
         self._solutions = solutions
         self._ledger = ledger
+        self._suggestions = suggestions
         self._project = project
         self._max_attempts = max_attempts
         self._max_tokens = max_tokens
         self._clock = clock
         self._listener: RepairListener | None = None
+        self._approve_team: ApproveSuggestion | None = None
         self._graph = self._build()
 
     def run(
@@ -100,12 +117,16 @@ class RepairPipeline:
         error_number: int = 1,
         use_cache: bool = True,
         listener: RepairListener | None = None,
+        approve_team: ApproveSuggestion | None = None,
     ) -> RepairResult:
         """Fix error number ``error_number`` of the run; it counts from 1.
 
         With ``use_cache`` off, stored solutions are not tried, but a new one is still kept.
+        ``approve_team`` is asked about each team suggestion before its code runs; without
+        it, the team is not consulted.
         """
         self._listener = listener
+        self._approve_team = approve_team
         try:
             state = cast(
                 RepairState,
@@ -121,6 +142,7 @@ class RepairPipeline:
             )
         finally:
             self._listener = None
+            self._approve_team = None
         result = RepairResult(
             status=state["status"],
             detail=state.get("detail", ""),
@@ -142,12 +164,14 @@ class RepairPipeline:
         graph = StateGraph(RepairState)
         graph.add_node("reproduce", self._reproduce)
         graph.add_node("recall", self._recall)
+        graph.add_node("consult_team", self._consult_team)
         graph.add_node("propose", self._propose)
         graph.add_node("test", self._test)
         graph.add_node("remember", self._remember)
         graph.add_edge(START, "reproduce")
         graph.add_conditional_edges("reproduce", _next_after_reproduce, ["recall", END])
-        graph.add_conditional_edges("recall", _next_after_recall, ["propose", END])
+        graph.add_conditional_edges("recall", _next_after_recall, ["consult_team", END])
+        graph.add_conditional_edges("consult_team", _next_after_team, ["propose", END])
         graph.add_conditional_edges("propose", _next_after_propose, ["test", "propose", END])
         graph.add_conditional_edges("test", _next_after_test, ["propose", "remember", END])
         graph.add_edge("remember", END)
@@ -204,10 +228,39 @@ class RepairPipeline:
                 logger.warning("A stale solution could not be removed: %s", exc)
         return update
 
+    def _consult_team(self, state: RepairState) -> RepairState:
+        approve = self._approve_team
+        if approve is None:
+            return {}
+        try:
+            matches = self._suggestions.find(state["target"])
+        except HealerError as exc:
+            logger.warning("Team suggestions could not be read: %s", exc)
+            return {}
+        update: RepairState = {}
+        for match in matches:
+            solution = match.received.solution
+            attempts = update.get("attempts", state["attempts"])
+            if any(a.proposal.patch.edits == solution.patch.edits for a in attempts):
+                continue
+            if not approve(match):
+                continue
+            update = self._try(
+                {**state, "attempts": attempts},
+                solution.as_proposal(),
+                source=AttemptSource.TEAM,
+                saved_tokens=min(solution.tokens_spent, self._max_tokens),
+                origin=solution.node,
+            )
+            if "status" in update:
+                break
+        return update
+
     def _propose(self, state: RepairState) -> RepairState:
         attempts = state["attempts"]
+        history = tuple(a for a in attempts if a.source is not AttemptSource.TEAM)
         try:
-            proposal = self._proposer.propose(state["target"], attempts)
+            proposal = self._proposer.propose(state["target"], history)
         except RejectedProposalError as exc:
             return self._record(attempts, exc.proposal, AttemptOutcome.REJECTED, problem=str(exc))
         except HealerError as exc:
@@ -259,6 +312,7 @@ class RepairPipeline:
         *,
         source: AttemptSource = AttemptSource.MODEL,
         saved_tokens: int = 0,
+        origin: str = "",
     ) -> RepairState:
         """Test ``proposal`` on a fresh copy and record the attempt."""
         attempts = state["attempts"]
@@ -274,6 +328,7 @@ class RepairPipeline:
                 problem=problem,
                 source=source,
                 saved_tokens=saved_tokens,
+                origin=origin,
             )
 
         try:
@@ -296,6 +351,7 @@ class RepairPipeline:
         problem: str = "",
         source: AttemptSource = AttemptSource.MODEL,
         saved_tokens: int = 0,
+        origin: str = "",
     ) -> RepairState:
         attempt = Attempt(
             number=len(attempts) + 1,
@@ -303,6 +359,7 @@ class RepairPipeline:
             outcome=outcome,
             source=source,
             saved_tokens=saved_tokens,
+            origin=origin,
             report=report,
             problem=problem,
         )
@@ -331,6 +388,10 @@ def _next_after_reproduce(state: RepairState) -> str:
 
 
 def _next_after_recall(state: RepairState) -> str:
+    return END if "status" in state else "consult_team"
+
+
+def _next_after_team(state: RepairState) -> str:
     return END if "status" in state else "propose"
 
 

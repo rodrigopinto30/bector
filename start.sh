@@ -60,4 +60,4 @@ mkdir -p "${WORKSPACE_PATH:-./workspace}"
 log "Building and starting services..."
 $DOCKER compose up -d --build
 
-log "Ready. Try: $DOCKER compose exec healer healer doctor"
+log "Ready. Try: $DOCKER compose exec cli healer doctor"

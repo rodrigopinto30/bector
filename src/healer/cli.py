@@ -26,7 +26,7 @@ from healer.domain.repair import (
     RepairResult,
     RepairStatus,
 )
-from healer.domain.sharing import MIN_KEY_LENGTH, Ingested, IngestOutcome
+from healer.domain.sharing import MIN_KEY_LENGTH, Ingested, IngestOutcome, TeamMatch
 from healer.domain.solution import Solution
 from healer.factory import (
     build_code_index,
@@ -359,13 +359,7 @@ def propose(
         typer.echo(f"saved      {save} (apply it to a copy with 'healer patch {save}')")
         typer.echo("")
     if not run_tests:
-        for edit in proposal.patch.edits:
-            typer.echo(f"--- {edit.path}" if edit.old else f"+++ {edit.path} (new file)")
-            for line in edit.old.splitlines():
-                typer.echo(f"- {line}")
-            for line in edit.new.splitlines():
-                typer.echo(f"+ {line}")
-            typer.echo("")
+        _echo_edits(proposal.patch)
         return
     try:
         runner = build_sandbox_runner(path, settings, timeout_seconds=timeout)
@@ -402,7 +396,11 @@ def run(
     ] = None,
     use_cache: Annotated[
         bool,
-        typer.Option("--cache/--no-cache", help="Try a stored solution before asking Claude"),
+        typer.Option("--cache/--no-cache", help="Try a solution stored for this workspace first"),
+    ] = True,
+    use_team: Annotated[
+        bool,
+        typer.Option("--team/--no-team", help="Offer the team's fixes before asking Claude"),
     ] = True,
     apply: ApplyOption = None,
     share: Annotated[
@@ -415,11 +413,13 @@ def run(
 ) -> None:
     """Run the tests on a copy and, if they fail, find a patch that makes them pass.
 
-    A solution already verified here for the same error is tried first, for free.
-    Otherwise Claude is asked for patches, and told why the previous ones failed, until
-    the tests pass or the attempt or token limit is reached. Each patch is tested on an
-    isolated copy. The fix is then shown and applied to your files only if you accept it.
-    With sharing on, an applied fix is also sent to the team's other nodes.
+    A solution already verified here for the same error is tried first, for free. Next,
+    the team's suggestions for this error are shown, and each one runs only if you say
+    so: testing it executes code written on another machine. Otherwise Claude is asked
+    for patches, and told why the previous ones failed, until the tests pass or the
+    attempt or token limit is reached. Each patch is tested on an isolated copy. The fix
+    is then shown and applied to your files only if you accept it. With sharing on, an
+    applied fix is also sent to the team's other nodes.
     """
     settings = Settings()
     limit = attempts or settings.repair_max_attempts
@@ -435,6 +435,7 @@ def run(
             error_number=error_number,
             use_cache=use_cache,
             listener=printer,
+            approve_team=_approve_suggestion if use_team else None,
         )
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -442,13 +443,43 @@ def run(
     fix = _report_repair(result, save)
     if fix is None or fix.report is None or fix.report.patch is None:
         return
+    from_team = fix.source is AttemptSource.TEAM
+    if from_team and apply:
+        typer.echo("team       --apply does not cover fixes from the team: confirm this one")
     applied = _offer_fix(
-        path, settings, fix.proposal.patch, fix.report.patch, apply=apply, saved=save
+        path,
+        settings,
+        fix.proposal.patch,
+        fix.report.patch,
+        apply=None if from_team and apply else apply,
+        saved=save,
     )
     if applied and result.solution is not None:
         _share(
             settings, result.solution, enabled=settings.share_solutions if share is None else share
         )
+
+
+def _approve_suggestion(match: TeamMatch) -> bool:
+    """Show a team suggestion and ask before its code runs.
+
+    The copy keeps a wrong patch away from your files, but it does not contain hostile
+    code: the tests run with this user's access, so nobody else's code runs unseen.
+    """
+    solution = match.received.solution
+    typer.echo("")
+    typer.echo(
+        f"team       suggestion from {_printable(solution.node)}, "
+        f"received {match.received.received_at:%Y-%m-%d %H:%M}"
+    )
+    match_kind = "same signature" if match.same_signature else "similar error"
+    typer.echo(f"fixes      {_printable(solution.error)} ({match_kind})")
+    typer.echo(f"proposal   {_printable(solution.explanation)}")
+    typer.echo("")
+    _echo_edits(solution.patch)
+    return _confirm(
+        "test this suggestion on a copy? Its code will run on this machine with your access"
+    )
 
 
 class _RepairPrinter:
@@ -476,9 +507,14 @@ class _RepairPrinter:
                 f"attempt {attempt.number}  local cache, 0 tokens "
                 f"(found by {proposal.model} for {attempt.saved_tokens} tokens)"
             )
+        elif attempt.source is AttemptSource.TEAM:
+            typer.echo(
+                f"attempt {attempt.number}  suggestion from {_printable(attempt.origin)}, 0 tokens"
+            )
         else:
             typer.echo(f"attempt {attempt.number}  {proposal.model}, {_tokens(proposal.usage)}")
-        typer.echo(f"proposal   {proposal.explanation}")
+        if attempt.source is not AttemptSource.TEAM:
+            typer.echo(f"proposal   {proposal.explanation}")
         report = attempt.report
         if report is not None and report.patch is not None:
             applied = report.patch
@@ -486,9 +522,16 @@ class _RepairPrinter:
                 f"patch      {_plural(len(applied.files), 'file')} "
                 f"(+{applied.lines_added} -{applied.lines_removed})"
             )
-        typer.echo(f"result     {_attempt_result(attempt)}")
-        if attempt.source is AttemptSource.CACHE and attempt.outcome is not AttemptOutcome.PASSED:
+        result = _attempt_result(attempt)
+        if attempt.source is AttemptSource.TEAM:
+            result = _printable(result)
+        typer.echo(f"result     {result}")
+        if attempt.outcome is AttemptOutcome.PASSED:
+            return
+        if attempt.source is AttemptSource.CACHE:
             typer.echo("cache      the stored solution no longer works and was discarded")
+        elif attempt.source is AttemptSource.TEAM:
+            typer.echo("team       this suggestion does not work here and is not recommended")
 
 
 def _attempt_result(attempt: Attempt) -> str:
@@ -530,6 +573,11 @@ def _report_repair(result: RepairResult, save: Path | None) -> Attempt | None:
         raise typer.Exit(code=1)
     if fix.source is AttemptSource.CACHE:
         typer.echo("verdict    fixed: the tests pass with a solution from the local cache")
+        typer.echo(f"spent      {spent}; saved about {result.tokens_saved} tokens")
+    elif fix.source is AttemptSource.TEAM:
+        typer.echo(
+            f"verdict    fixed: the tests pass here with the fix from {_printable(fix.origin)}"
+        )
         typer.echo(f"spent      {spent}; saved about {result.tokens_saved} tokens")
     else:
         typer.echo(f"verdict    fixed: the tests pass with the patch of attempt {fix.number}")
@@ -630,10 +678,33 @@ _DIFF_COLORS = (
 
 
 def _echo_diff(diff: str) -> None:
-    """Print a unified diff, in color when the terminal supports it."""
-    for line in diff.rstrip().splitlines():
+    """Print a unified diff, in color when the terminal supports it.
+
+    Control characters are masked: the developer decides from this text, and a patch must
+    not be able to hide lines from it.
+    """
+    for line in _lines(diff.rstrip()):
         color = next((c for prefix, c in _DIFF_COLORS if line.startswith(prefix)), None)
         typer.secho(line, fg=color, bold=line.startswith(("+++", "---")))
+
+
+def _echo_edits(patch: Patch) -> None:
+    """Print a patch that has not been applied, so there is no diff yet."""
+    for edit in patch.edits:
+        path = _printable(edit.path)
+        typer.echo(f"--- {path}" if edit.old else f"+++ {path} (new file)")
+        for line in _lines(edit.old):
+            typer.echo(f"- {line}")
+        for line in _lines(edit.new):
+            typer.echo(f"+ {line}")
+        typer.echo("")
+
+
+def _lines(text: str) -> list[str]:
+    """The lines of ``text`` as they can be shown; only a real newline ends a line."""
+    if not text:
+        return []
+    return [_printable(line.removesuffix("\r")) for line in text.removesuffix("\n").split("\n")]
 
 
 def _tokens(usage: TokenUsage) -> str:
@@ -770,7 +841,8 @@ def savings(
     rows = [*summarize(entries, by.value), total(entries)]
     width = max(len(by.value), *(len(row.key) for row in rows))
     typer.echo(
-        f"{by.value:<{width}}  incidents  fixed  from cache  model calls  tokens used  tokens saved"
+        f"{by.value:<{width}}  incidents  fixed  from cache  from team  model calls  "
+        "tokens used  tokens saved"
     )
     for row in rows:
         if row.key == "total":
@@ -785,7 +857,8 @@ def savings(
 def _savings_row(row: LedgerSummary, width: int) -> str:
     return (
         f"{row.key:<{width}}  {row.incidents:>9}  {row.fixed:>5}  {row.from_cache:>10}  "
-        f"{row.model_attempts:>11}  {row.tokens_used:>11}  {row.tokens_saved:>12}"
+        f"{row.from_team:>9}  {row.model_attempts:>11}  {row.tokens_used:>11}  "
+        f"{row.tokens_saved:>12}"
     )
 
 
@@ -874,13 +947,13 @@ def _ingested_line(ingested: Ingested) -> str:
 
 
 def _printable(text: str) -> str:
-    """Text from other nodes without control characters, which could fool the terminal."""
-    return "".join(c if c.isprintable() else "?" for c in text)
+    """Text without control characters, which could fool the terminal. Tabs are kept."""
+    return "".join(c if c.isprintable() or c == "\t" else "?" for c in text)
 
 
 @app.command()
 def team() -> None:
-    """Show the fixes received from the team. They are suggestions: none is applied."""
+    """Show the fixes received from the team. 'healer run' offers them; none is applied alone."""
     try:
         suggestions = build_team_solutions(Settings()).all()
     except HealerError as exc:
