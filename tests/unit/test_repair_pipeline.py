@@ -1,8 +1,10 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from healer.adapters.sqlite_ledger import SqliteLedger
 from healer.domain.diagnosis import Diagnosis, StackFrame, TracedError
 from healer.domain.errors import (
     CommandNotAllowedError,
@@ -18,8 +20,10 @@ from healer.domain.ledger import LedgerEntry, Resolution
 from healer.domain.patch import AppliedPatch, FileEdit, Patch
 from healer.domain.proposal import Proposal, TokenUsage
 from healer.domain.repair import Attempt, AttemptOutcome, AttemptSource, RepairStatus
+from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, TeamMatch
 from healer.domain.solution import Solution
 from healer.pipeline.repair import RepairPipeline
+from healer.services.suggestion_finder import SuggestionFinder
 
 
 def diagnosis(error_type: str, message: str, line: int = 2) -> Diagnosis:
@@ -160,6 +164,45 @@ class FakeLedger:
         return self.recorded
 
 
+class FakeTeam:
+    """Suggestions kept by signature. It has no ``save`` or ``remove``: the loop only reads."""
+
+    def __init__(self, *stored: ReceivedSolution, fail: bool = False) -> None:
+        self.stored = {r.solution.signature: r for r in stored}
+        self.fail = fail
+
+    def find(self, signature: str) -> ReceivedSolution | None:
+        if self.fail:
+            raise IndexingError("Stored team solution abc is corrupt")
+        return self.stored.get(signature)
+
+    def similar(self, error: str, limit: int) -> list[TeamMatch]:
+        return [
+            TeamMatch(received=r, distance=0.0)
+            for r in self.stored.values()
+            if r.solution.error == error
+        ][:limit]
+
+
+def suggestion(
+    answer: Patch, *, signature: str = KEY_ERROR.signature, tokens: int = 2_900
+) -> ReceivedSolution:
+    return ReceivedSolution(
+        solution=SharedSolution(
+            node="laptop-ana",
+            published_at=NOW,
+            signature=signature,
+            error="KeyError: 'db'",
+            patch=answer,
+            explanation="a team fix",
+            model="claude-sonnet-5-5",
+            tokens_spent=tokens,
+            evidence=Evidence(command="pytest", exit_code_before=1, verified_at=NOW),
+        ),
+        received_at=NOW,
+    )
+
+
 def solution(answer: Patch, tokens: int = 2_900) -> Solution:
     return Solution(
         signature=KEY_ERROR.signature,
@@ -182,12 +225,16 @@ def build(
     tokens: int = 100_000,
     solutions: FakeSolutions | None = None,
     ledger: FakeLedger | None = None,
+    team: FakeTeam | None = None,
 ) -> RepairPipeline:
     return RepairPipeline(
         runner,  # type: ignore[arg-type]
         proposer,  # type: ignore[arg-type]
         solutions if solutions is not None else FakeSolutions(),
         ledger if ledger is not None else FakeLedger(),
+        suggestions=SuggestionFinder(
+            team if team is not None else FakeTeam(), max_distance=0.1, max_matches=3
+        ),
         project="/workspace",
         max_attempts=attempts,
         max_tokens=tokens,
@@ -484,3 +531,163 @@ def test_a_sandbox_failure_while_replaying_keeps_the_stored_solution() -> None:
     result = build(runner, FakeProposer([]), solutions=solutions).run("python -m pytest")
     assert result.status is RepairStatus.STOPPED
     assert solutions.removed == []
+
+
+def test_a_team_suggestion_fixes_the_error_without_the_model() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    proposer = FakeProposer([])
+    solutions, ledger = FakeSolutions(), FakeLedger()
+    pipeline = build(
+        runner, proposer, solutions=solutions, ledger=ledger, team=FakeTeam(suggestion(FULL))
+    )
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: True)
+
+    assert result.status is RepairStatus.FIXED
+    fix = result.fix
+    assert fix is not None
+    assert (fix.source, fix.origin) == (AttemptSource.TEAM, "laptop-ana")
+    assert result.usage.total == 0
+    assert result.tokens_saved == 2_900
+    assert proposer.calls == []
+    assert ledger.recorded[0].resolution is Resolution.TEAM
+    assert (result.stored, result.solution) == (False, None)
+    assert solutions.stored == {}
+
+
+def test_the_local_cache_goes_before_the_team() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {PARTIAL: report(patch=PARTIAL)})
+    asked: list[TeamMatch] = []
+
+    def approve(match: TeamMatch) -> bool:
+        asked.append(match)
+        return True
+
+    pipeline = build(
+        runner,
+        FakeProposer([]),
+        solutions=FakeSolutions(solution(PARTIAL)),
+        team=FakeTeam(suggestion(FULL)),
+    )
+
+    result = pipeline.run("python -m pytest", approve_team=approve)
+
+    assert result.fix is not None and result.fix.source is AttemptSource.CACHE
+    assert asked == []
+
+
+def test_the_team_is_not_consulted_without_a_way_to_approve() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    proposer = FakeProposer([FULL])
+    pipeline = build(runner, proposer, team=FakeTeam(suggestion(PARTIAL)))
+
+    result = pipeline.run("python -m pytest")
+
+    assert result.fix is not None and result.fix.source is AttemptSource.MODEL
+    assert runner.runs == [None, FULL]
+
+
+def test_a_declined_suggestion_never_runs() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    proposer = FakeProposer([FULL])
+    pipeline = build(runner, proposer, team=FakeTeam(suggestion(PARTIAL)))
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: False)
+
+    assert runner.runs == [None, FULL]
+    assert [a.source for a in result.attempts] == [AttemptSource.MODEL]
+
+
+def test_a_failed_suggestion_is_kept_and_the_model_never_sees_it() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    proposer = FakeProposer([FULL])
+    team = FakeTeam(suggestion(PARTIAL))
+    pipeline = build(runner, proposer, attempts=1, team=team)
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: True)
+
+    assert result.status is RepairStatus.FIXED
+    assert [(a.source, a.outcome) for a in result.attempts] == [
+        (AttemptSource.TEAM, AttemptOutcome.FAILED),
+        (AttemptSource.MODEL, AttemptOutcome.PASSED),
+    ]
+    assert proposer.calls == [(KEY_ERROR, ())]
+    assert team.find(KEY_ERROR.signature) is not None
+
+
+def test_a_suggestion_that_does_not_fit_moves_on_to_the_next_one() -> None:
+    runner = FakeRunner(
+        report(KEY_ERROR),
+        {PARTIAL: PatchConflictError("text not found"), FULL: report(patch=FULL)},
+    )
+    team = FakeTeam(suggestion(PARTIAL), suggestion(FULL, signature="f" * 64))
+    pipeline = build(runner, FakeProposer([]), team=team)
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: True)
+
+    assert [a.outcome for a in result.attempts] == [
+        AttemptOutcome.REJECTED,
+        AttemptOutcome.PASSED,
+    ]
+
+
+def test_a_suggestion_with_the_patch_that_just_failed_is_not_offered() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    proposer = FakeProposer([FULL])
+    asked: list[TeamMatch] = []
+
+    def approve(match: TeamMatch) -> bool:
+        asked.append(match)
+        return True
+
+    pipeline = build(
+        runner,
+        proposer,
+        solutions=FakeSolutions(solution(PARTIAL)),
+        team=FakeTeam(suggestion(PARTIAL)),
+    )
+
+    pipeline.run("python -m pytest", approve_team=approve)
+
+    assert asked == []
+    assert runner.runs == [None, PARTIAL, FULL]
+
+
+def test_an_unreadable_team_store_does_not_stop_the_loop() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    pipeline = build(runner, FakeProposer([FULL]), team=FakeTeam(fail=True))
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: True)
+
+    assert result.fix is not None and result.fix.source is AttemptSource.MODEL
+
+
+def test_a_sandbox_failure_while_testing_a_suggestion_stops_the_loop() -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: ExecutionError("no space left")})
+    proposer = FakeProposer([])
+    team = FakeTeam(suggestion(FULL), suggestion(PARTIAL, signature="f" * 64))
+    pipeline = build(runner, proposer, team=team)
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: True)
+
+    assert result.status is RepairStatus.STOPPED
+    assert "no space left" in result.detail
+    assert runner.runs == [None, FULL]
+    assert proposer.calls == []
+
+
+def test_the_savings_another_node_claims_are_capped_by_the_budget(tmp_path: Path) -> None:
+    runner = FakeRunner(report(KEY_ERROR), {FULL: report(patch=FULL)})
+    ledger = SqliteLedger(tmp_path / "ledger.sqlite3")
+    pipeline = build(
+        runner,
+        FakeProposer([]),
+        tokens=5_000,
+        ledger=ledger,  # type: ignore[arg-type]
+        team=FakeTeam(suggestion(FULL, tokens=10**30)),
+    )
+
+    result = pipeline.run("python -m pytest", approve_team=lambda _: True)
+
+    assert result.tokens_saved == 5_000
+    assert ledger.entries()[0].tokens_saved == 5_000

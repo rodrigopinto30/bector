@@ -17,6 +17,7 @@ class Resolution(StrEnum):
     """The level that solved the incident (6.1), or none."""
 
     CACHE = "cache"
+    TEAM = "team"
     MODEL = "model"
     NONE = "none"
 
@@ -44,6 +45,7 @@ class LedgerSummary(BaseModel):
     incidents: int
     fixed: int
     from_cache: int
+    from_team: int
     model_attempts: int
     tokens_used: int
     tokens_saved: int
@@ -58,6 +60,8 @@ def ledger_entry(result: RepairResult, *, project: str, at: datetime) -> LedgerE
         resolution = Resolution.NONE
     elif fix.source is AttemptSource.CACHE:
         resolution = Resolution.CACHE
+    elif fix.source is AttemptSource.TEAM:
+        resolution = Resolution.TEAM
     else:
         resolution = Resolution.MODEL
     return LedgerEntry(
@@ -91,6 +95,7 @@ def total(entries: Iterable[LedgerEntry], *, key: str = "total") -> LedgerSummar
         incidents=len(items),
         fixed=sum(1 for e in items if e.resolution is not Resolution.NONE),
         from_cache=sum(1 for e in items if e.resolution is Resolution.CACHE),
+        from_team=sum(1 for e in items if e.resolution is Resolution.TEAM),
         model_attempts=sum(e.model_attempts for e in items),
         tokens_used=sum(e.usage.total for e in items),
         tokens_saved=sum(e.tokens_saved for e in items),

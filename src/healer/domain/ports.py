@@ -11,7 +11,7 @@ from healer.domain.ledger import LedgerEntry
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
 from healer.domain.proposal import Proposal
-from healer.domain.sharing import ReceivedSolution
+from healer.domain.sharing import ReceivedSolution, TeamMatch
 from healer.domain.solution import Solution
 
 
@@ -171,4 +171,8 @@ class TeamSolutionRepository(Protocol):
 
     def all(self) -> list[ReceivedSolution]:
         """Return every suggestion, the most recently received first."""
+        ...
+
+    def similar(self, error: str, limit: int) -> list[TeamMatch]:
+        """Return the suggestions whose error reads most like ``error``, closest first."""
         ...

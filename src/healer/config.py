@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     share_key: SecretStr | None = None
     node_id: str = Field(default_factory=socket.gethostname)
     max_share_bytes: int = 256_000
+    team_max_distance: float = 0.1
+    team_max_suggestions: int = 3
     test_command: str = "python -m pytest"
     allowed_test_commands: list[str] = ["pytest", "python -m pytest"]
     test_timeout_seconds: float = 300.0

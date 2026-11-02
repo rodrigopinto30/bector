@@ -36,7 +36,7 @@ def entry(
         error_type="KeyError",
         status=RepairStatus.FIXED if resolution is not Resolution.NONE else RepairStatus.STOPPED,
         resolution=resolution,
-        model_attempts=0 if resolution is Resolution.CACHE else 2,
+        model_attempts=0 if resolution in (Resolution.CACHE, Resolution.TEAM) else 2,
         usage=TokenUsage(input_tokens=used, output_tokens=0),
         tokens_saved=saved,
     )
@@ -144,3 +144,14 @@ def test_corrupt_records_raise_a_project_error(tmp_path: Path) -> None:
     db.close()
     with pytest.raises(LedgerError, match="corrupt"):
         ledger.entries()
+
+
+def test_a_fix_from_the_team_is_counted_on_its_own(tmp_path: Path) -> None:
+    ledger = SqliteLedger(tmp_path / "ledger.sqlite3")
+    ledger.record(entry(resolution=Resolution.TEAM, used=0, saved=2_900))
+    ledger.record(entry(resolution=Resolution.CACHE, used=0, saved=100))
+
+    overall = total(ledger.entries())
+
+    assert (overall.fixed, overall.from_cache, overall.from_team) == (2, 1, 1)
+    assert overall.tokens_saved == 3_000

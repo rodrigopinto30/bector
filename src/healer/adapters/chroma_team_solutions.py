@@ -8,7 +8,7 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from pydantic import ValidationError
 
 from healer.domain.errors import IndexingError
-from healer.domain.sharing import ReceivedSolution
+from healer.domain.sharing import ReceivedSolution, TeamMatch
 
 
 class ChromaTeamSolutions:
@@ -62,6 +62,25 @@ class ChromaTeamSolutions:
             for identifier, metadata in zip(found["ids"], found["metadatas"] or [], strict=True)
         ]
         return sorted(records, key=lambda r: r.received_at, reverse=True)
+
+    def similar(self, error: str, limit: int) -> list[TeamMatch]:
+        total = self._collection.count()
+        if total == 0 or limit < 1:
+            return []
+        found = self._collection.query(
+            query_texts=[error],
+            n_results=min(limit, total),
+            include=["metadatas", "distances"],
+        )
+        identifiers = found["ids"][0]
+        metadatas = (found["metadatas"] or [[]])[0]
+        distances = (found["distances"] or [[]])[0]
+        return [
+            TeamMatch(received=_parse(metadata, identifier), distance=max(distance, 0.0))
+            for identifier, metadata, distance in zip(
+                identifiers, metadatas, distances, strict=True
+            )
+        ]
 
     def count(self) -> int:
         return self._collection.count()

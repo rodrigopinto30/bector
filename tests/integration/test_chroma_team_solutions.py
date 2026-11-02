@@ -15,13 +15,19 @@ pytestmark = pytest.mark.integration
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
 
 
-def received(letter: str, *, new: str = 'c.get("db")', at: datetime = NOW) -> ReceivedSolution:
+def received(
+    letter: str,
+    *,
+    new: str = 'c.get("db")',
+    at: datetime = NOW,
+    error: str = "KeyError: 'db'",
+) -> ReceivedSolution:
     return ReceivedSolution(
         solution=SharedSolution(
             node="laptop-ana",
             published_at=at,
             signature=letter * 64,
-            error="KeyError: 'db'",
+            error=error,
             patch=Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new=new),)),
             explanation="Use a default.",
             model="claude-sonnet-5-5",
@@ -57,6 +63,23 @@ def test_all_lists_the_most_recently_received_first(repo: ChromaTeamSolutions) -
     assert repo.all() == [newer, older]
 
 
+def test_similar_returns_the_closest_errors_first(repo: ChromaTeamSolutions) -> None:
+    assert repo.similar("KeyError: 'db'", limit=3) == []
+    near = received("a", error="KeyError: 'db'")
+    far = received("b", error="ZeroDivisionError: division by zero")
+    repo.save(far)
+    repo.save(near)
+
+    matches = repo.similar("KeyError: 'db'", limit=5)
+
+    assert [m.received for m in matches] == [near, far]
+    assert matches[0].distance == pytest.approx(0, abs=1e-6)
+    assert matches[0].distance >= 0
+    assert matches[1].distance > matches[0].distance
+    assert not matches[0].same_signature
+    assert [m.received for m in repo.similar("KeyError: 'db'", limit=1)] == [near]
+
+
 def test_a_corrupt_record_is_reported(repo: ChromaTeamSolutions) -> None:
     repo.save(received("a"))
     repo._collection.update(ids=["a" * 64], metadatas=[{"received_json": "{"}])
@@ -64,3 +87,5 @@ def test_a_corrupt_record_is_reported(repo: ChromaTeamSolutions) -> None:
         repo.find("a" * 64)
     with pytest.raises(IndexingError, match="corrupt"):
         repo.all()
+    with pytest.raises(IndexingError, match="corrupt"):
+        repo.similar("KeyError: 'db'", limit=1)
