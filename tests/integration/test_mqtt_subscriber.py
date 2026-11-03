@@ -1,5 +1,3 @@
-import os
-import socket
 import threading
 import time
 import uuid
@@ -12,22 +10,11 @@ from paho.mqtt.enums import CallbackAPIVersion
 
 from healer.adapters.mqtt_publisher import MqttPublisher
 from healer.adapters.mqtt_subscriber import MqttSubscriber
-
-HOST = os.environ.get("MQTT_HOST", "localhost")
-PORT = int(os.environ.get("MQTT_PORT", "1883"))
-
-
-def broker_reachable() -> bool:
-    try:
-        with socket.create_connection((HOST, PORT), timeout=1):
-            return True
-    except OSError:
-        return False
-
+from tests.integration.mqtt_broker import HOST, PASSWORD, PORT, SKIP_REASON, USERNAME, topic_for
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not broker_reachable(), reason="no MQTT broker reachable"),
+    pytest.mark.skipif(bool(SKIP_REASON), reason=SKIP_REASON),
 ]
 
 
@@ -41,7 +28,14 @@ def wait_until(condition: Callable[[], bool]) -> None:
 @contextmanager
 def listening(topic: str, client_id: str, received: list[bytes]) -> Iterator[None]:
     statuses: list[str] = []
-    subscriber = MqttSubscriber(host=HOST, port=PORT, topic=topic, client_id=client_id)
+    subscriber = MqttSubscriber(
+        host=HOST,
+        port=PORT,
+        topic=topic,
+        client_id=client_id,
+        username=USERNAME,
+        password=PASSWORD,
+    )
     thread = threading.Thread(target=subscriber.run, args=(received.append, statuses.append))
     thread.start()
     try:
@@ -57,6 +51,7 @@ def forget_session(client_id: str) -> None:
     """Ask the broker to drop the durable session the test created."""
     connected = threading.Event()
     client = mqtt.Client(CallbackAPIVersion.VERSION2, client_id=client_id, clean_session=True)
+    client.username_pw_set(USERNAME, PASSWORD)
     client.on_connect = lambda *_: connected.set()
     client.connect(HOST, PORT)
     client.loop_start()
@@ -66,8 +61,15 @@ def forget_session(client_id: str) -> None:
 
 
 def test_what_is_sent_while_the_node_is_off_arrives_when_it_returns() -> None:
-    topic, client_id = f"healer-test/{uuid.uuid4().hex}", f"healer-test-{uuid.uuid4().hex}"
-    publisher = MqttPublisher(host=HOST, port=PORT, topic=topic, client_id="healer-test")
+    topic, client_id = topic_for(uuid.uuid4().hex), f"healer-test-{uuid.uuid4().hex}"
+    publisher = MqttPublisher(
+        host=HOST,
+        port=PORT,
+        topic=topic,
+        client_id="healer-test",
+        username=USERNAME,
+        password=PASSWORD,
+    )
     online: list[bytes] = []
     later: list[bytes] = []
     try:
