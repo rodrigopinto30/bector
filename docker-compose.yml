@@ -2,8 +2,8 @@ x-healer: &healer
   build: .
   env_file: .env
   environment:
-    MQTT_HOST: mosquitto
-    MQTT_PORT: 1883
+    MQTT_HOST: ${MQTT_HOST:-mosquitto}
+    MQTT_PORT: ${MQTT_PORT:-1883}
     CHROMA_PATH: /data/chroma
     LEDGER_PATH: /data/healer/ledger.sqlite3
   volumes:
@@ -19,13 +19,24 @@ x-healer: &healer
 
 services:
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.1.2-alpine
     container_name: healer-mosquitto
     ports:
-      - "${MQTT_PORT:-1883}:1883"
+      - "${BROKER_BIND:-127.0.0.1}:${BROKER_PORT:-1883}:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data
+      - mosquitto-security:/mosquitto/security
+    # The password and ACL files must exist before Mosquitto starts, readable only by the
+    # mosquitto user (1883), which is the user it reads them as.
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        mkdir -p /mosquitto/security && cd /mosquitto/security &&
+        touch passwd acl && chown 1883:1883 . passwd acl &&
+        chmod 700 . && chmod 600 passwd acl &&
+        exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
     restart: unless-stopped
 
   cli:
@@ -40,6 +51,7 @@ services:
 
 volumes:
   mosquitto-data:
+  mosquitto-security:
   chroma-data:
   chroma-models:
   healer-data:

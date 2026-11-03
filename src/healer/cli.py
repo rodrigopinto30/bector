@@ -34,6 +34,7 @@ from healer.factory import (
     build_fix_installer,
     build_fix_proposer,
     build_ledger,
+    build_publisher,
     build_repair_pipeline,
     build_sandbox_runner,
     build_solution_ingester,
@@ -70,7 +71,8 @@ def doctor() -> None:
         failed = True
         typer.echo("[fail] ANTHROPIC_API_KEY is not set")
     settings = Settings()
-    typer.echo(f"[info] MQTT broker: {settings.mqtt_host}:{settings.mqtt_port}")
+    if not _broker_ready(settings):
+        failed = True
     key = settings.share_key.get_secret_value().strip() if settings.share_key else ""
     if not settings.share_solutions:
         typer.echo("[info] sharing: off (set SHARE_SOLUTIONS=true to send accepted fixes)")
@@ -83,6 +85,25 @@ def doctor() -> None:
     else:
         typer.echo(f"[ok]   sharing: on, as node {settings.node_id} on {settings.mqtt_topic}")
     raise typer.Exit(code=1 if failed else 0)
+
+
+def _broker_ready(settings: Settings) -> bool:
+    """Print whether the broker accepts this node's credentials."""
+    address = f"{settings.mqtt_host}:{settings.mqtt_port}"
+    user = settings.mqtt_username
+    try:
+        build_publisher(settings).check()
+    except HealerError as exc:
+        typer.echo(f"[fail] MQTT broker {address}: {exc}")
+        if user is None:
+            typer.echo(
+                "       MQTT_USERNAME and MQTT_PASSWORD are not set: ./start.sh creates them "
+                "for the broker of this machine, and './broker.sh add NODE_ID' on another "
+                "machine gives them for its broker"
+            )
+        return False
+    typer.echo(f"[ok]   MQTT broker {address} accepts {user or 'anonymous clients'}")
+    return True
 
 
 WorkspaceOption = Annotated[

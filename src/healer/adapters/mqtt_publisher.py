@@ -4,7 +4,8 @@ import logging
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,28 @@ class MqttPublisher:
                 logger.info("MQTT publish failed (%s); retrying in %.1fs", exc, delay)
                 self._sleep(delay)
 
+    def check(self) -> None:
+        """Connect and leave; raise ``SharingError`` if the broker does not accept this node."""
+        try:
+            with self._connected():
+                pass
+        except _RetryableError as exc:
+            raise SharingError(
+                f"the broker at {self._host}:{self._port} could not be reached: {exc}"
+            ) from exc
+
     def _publish_once(self, message: bytes) -> None:
+        with self._connected() as client:
+            info = client.publish(self._topic, message, qos=1)
+            try:
+                info.wait_for_publish(self._timeout)
+            except (RuntimeError, ValueError) as exc:
+                raise _RetryableError(str(exc)) from exc
+            if not info.is_published():
+                raise _RetryableError("the broker did not confirm the message")
+
+    @contextmanager
+    def _connected(self) -> Iterator[mqtt.Client]:
         client = mqtt.Client(
             CallbackAPIVersion.VERSION2,
             client_id=f"{self._client_id}-{secrets.token_hex(4)}",
@@ -103,13 +125,7 @@ class MqttPublisher:
                 raise _RetryableError("no answer from the broker")
             if refused:
                 raise SharingError(f"the broker refused the connection: {refused[0]}")
-            info = client.publish(self._topic, message, qos=1)
-            try:
-                info.wait_for_publish(self._timeout)
-            except (RuntimeError, ValueError) as exc:
-                raise _RetryableError(str(exc)) from exc
-            if not info.is_published():
-                raise _RetryableError("the broker did not confirm the message")
+            yield client
         finally:
             client.disconnect()
             client.loop_stop()

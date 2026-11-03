@@ -27,3 +27,18 @@ def test_an_unreachable_broker_is_retried_with_backoff_and_then_reported() -> No
     with pytest.raises(SharingError, match=r"the broker at 127\.0\.0\.1:\d+ could not be reached"):
         publisher.publish(b"{}")
     assert waits == [1.0, 2.0]
+
+
+def test_checking_an_unreachable_broker_fails_without_retrying() -> None:
+    waits: list[float] = []
+    publisher = MqttPublisher(
+        host="127.0.0.1",
+        port=closed_port(),
+        topic="healer-test/solutions",
+        client_id="healer-test",
+        timeout_seconds=2,
+        sleep=waits.append,
+    )
+    with pytest.raises(SharingError, match=r"the broker at 127\.0\.0\.1:\d+ could not be reached"):
+        publisher.check()
+    assert waits == []

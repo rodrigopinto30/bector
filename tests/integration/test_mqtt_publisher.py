@@ -1,5 +1,3 @@
-import os
-import socket
 import threading
 import uuid
 
@@ -8,26 +6,17 @@ import pytest
 from paho.mqtt.enums import CallbackAPIVersion
 
 from healer.adapters.mqtt_publisher import MqttPublisher
-
-HOST = os.environ.get("MQTT_HOST", "localhost")
-PORT = int(os.environ.get("MQTT_PORT", "1883"))
-
-
-def broker_reachable() -> bool:
-    try:
-        with socket.create_connection((HOST, PORT), timeout=1):
-            return True
-    except OSError:
-        return False
+from tests.integration.mqtt_broker import HOST, PASSWORD, PORT, SKIP_REASON, USERNAME, topic_for
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not broker_reachable(), reason="no MQTT broker reachable")
+@pytest.mark.skipif(bool(SKIP_REASON), reason=SKIP_REASON)
 def test_a_subscriber_receives_the_published_message() -> None:
-    topic = f"healer-test/{uuid.uuid4().hex}"
+    topic = topic_for(uuid.uuid4().hex)
     received: list[bytes] = []
     subscribed, arrived = threading.Event(), threading.Event()
     subscriber = mqtt.Client(CallbackAPIVersion.VERSION2)
+    subscriber.username_pw_set(USERNAME, PASSWORD)
     subscriber.on_connect = lambda c, *_: c.subscribe(topic, qos=1)
     subscriber.on_subscribe = lambda *_: subscribed.set()
 
@@ -40,9 +29,14 @@ def test_a_subscriber_receives_the_published_message() -> None:
     subscriber.loop_start()
     try:
         assert subscribed.wait(5)
-        MqttPublisher(host=HOST, port=PORT, topic=topic, client_id="healer-test").publish(
-            b'{"solution": 1}'
-        )
+        MqttPublisher(
+            host=HOST,
+            port=PORT,
+            topic=topic,
+            client_id="healer-test",
+            username=USERNAME,
+            password=PASSWORD,
+        ).publish(b'{"solution": 1}')
         assert arrived.wait(5)
     finally:
         subscriber.disconnect()

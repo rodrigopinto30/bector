@@ -24,7 +24,7 @@ All five development phases are implemented. The system is ready to use on one m
 
 **Still pending before using it across machines:**
 
-- **Broker security.** The bundled Mosquitto accepts anonymous connections and has no TLS. Publishing a message the other nodes accept still requires the team key.
+- **Broker encryption.** The broker requires a user and password per node and limits each one to the team topic, but there is no TLS yet: on a network, passwords and messages travel unencrypted. Until then, open the broker only on a trusted network.
 - **Real isolation for tests.** The container runs as root, and code under test can reach the network, the mounted workspace and the credentials of the running process. This is why team suggestions need your approval before they run.
 - **Reproducible builds.** Dependency versions are minimum bounds, and there is no lock file.
 - **CI.** There is no pipeline yet: ruff, mypy and pytest are run by hand, and there is no dependency audit.
@@ -65,7 +65,7 @@ Every incident is recorded in a local ledger, so the tokens spent and saved can 
 ## Requirements
 
 - Linux (the start script can install Docker for you) or any system with Docker and Docker Compose already installed.
-- Port `1883` free on your machine (used by the MQTT broker).
+- Port `1883` free on your machine (the MQTT broker listens on it, only for this machine by default).
 - An Anthropic API key, only for the fixes that Claude has to write.
 
 ## Getting started
@@ -78,7 +78,8 @@ The script will:
 
 1. Check that Docker and the Compose plugin are available, and install them if they are missing (Linux only, may ask for `sudo`).
 2. Create `.env` from `.env.example` if it does not exist.
-3. Build the image and start the services.
+3. Give this machine a user and password for its MQTT broker, written at the end of `.env` the first time.
+4. Build the image and start the services.
 
 Then check the setup:
 
@@ -90,7 +91,7 @@ To stop everything:
 
 ```bash
 ./stop.sh            # stop the services, keep the data
-./stop.sh --clean    # stop the services and delete all data (Chroma, the ledger and Mosquitto)
+./stop.sh --clean    # stop the services and delete all data (Chroma, the ledger, Mosquitto and its users)
 ```
 
 > If Docker was just installed by the script, your user may not be in the `docker` group until you open a new session. Until then, use `sudo docker ...`.
@@ -100,7 +101,7 @@ To stop everything:
 | Service | Container | Purpose |
 | --- | --- | --- |
 | `cli` | `healer-cli` | Where the `healer` command runs. |
-| `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. |
+| `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. Only the nodes added with `./broker.sh` can connect. |
 | `listener` | `healer-listener` | Optional. Runs `healer listen` in the background; it only starts with the `team` profile. |
 
 In `docker compose exec cli healer doctor`, `cli` is the service and `healer doctor` is the command that runs inside it. If you get `service "healer" is not running`, the command is from before the service was renamed to `cli`; `./stop.sh` also removes the old container.
@@ -394,6 +395,33 @@ docker compose exec cli healer apply fix.json --yes       # apply without asking
 - Only the files of the patch are checked. If you changed other files after the test, the tests may behave differently; `healer apply` tests the patch again against the current code.
 - **Exit codes** of `healer apply`: `0` when the tests pass with the patch (applied or not), `1` when they still fail (nothing is written), `2` on invalid patches, patches that no longer fit the code, or write errors.
 
+## The broker: who can connect
+
+The bundled Mosquitto only accepts the machines (nodes) it knows, and each one may only use the team topic (`MQTT_TOPIC` and its subtopics). Without a user and password nobody can connect, not even to read.
+
+```bash
+./broker.sh add laptop-luis      # let a machine connect; prints the lines for its .env
+./broker.sh list                 # the machines that may connect
+./broker.sh remove laptop-luis   # revoke a machine; it is disconnected at once
+```
+
+```text
+[broker] laptop-luis may now connect. Add these lines to the .env of that machine:
+
+MQTT_HOST=<address of this machine>
+MQTT_PORT=1883
+MQTT_USERNAME=laptop-luis
+MQTT_PASSWORD=...
+NODE_ID=laptop-luis
+```
+
+- **This machine needs nothing.** The first time, `./start.sh` writes its `MQTT_USERNAME` and `MQTT_PASSWORD` at the end of `.env` and adds it to the broker. `healer doctor` says whether the broker accepts it.
+- **Private by default.** The broker only listens on this machine (`127.0.0.1`). To let the other machines in, set `BROKER_BIND=0.0.0.0` in `.env` and run `./stop.sh && ./start.sh`. There is no TLS yet, so do this only on a trusted network: passwords and messages travel unencrypted.
+- **Using the broker of another machine.** On the machine with the broker, run `./broker.sh add` with the new machine's `NODE_ID`. Copy the lines it prints into the new machine's `.env`, with `MQTT_HOST` set to the broker machine's address, and run `./stop.sh && ./start.sh` there. Its own broker is then left alone.
+- **One password per machine.** One machine can be revoked without changing the others. Adding or removing a machine applies at once, and the rest stay connected.
+- **What it does not prevent.** A node that may connect can still publish messages claiming to come from another node, or take over another node's durable session by reusing its client name. The team key (`SHARE_KEY`) still decides which messages are accepted.
+- `./stop.sh --clean` also deletes the broker's users. `./start.sh` adds this machine again; the others must be added again.
+
 ## Sharing fixes with the team
 
 When sharing is on, a fix you accept in `healer run` is also sent to the team's other machines (nodes) through the MQTT broker, so nobody has to solve the same error again. It is off by default.
@@ -426,7 +454,7 @@ shared     sent to the team as node laptop-ana on healer/solutions/v1 (... bytes
 - **Secrets.** The summary, explanation and command are redacted first. If the patch itself contains something that looks like a secret, it is not shared at all, because masking it would break it.
 - **Signed.** Each message carries an HMAC-SHA256 of its content made with `SHARE_KEY` (at least 16 characters), so receivers can reject forged or altered messages.
 - **Delivery.** QoS 1 (the broker confirms it), `MQTT_TIMEOUT_SECONDS` per step (10) and `MQTT_MAX_RETRIES` retries with backoff (2). If the broker cannot be reached, a warning is printed; the fix stays applied and the exit code does not change. Messages larger than `MAX_SHARE_BYTES` (256,000) are not sent.
-- **Broker security.** The bundled Mosquitto accepts anonymous connections, which is only fine on a trusted local network. Elsewhere, set `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_TLS=true` and `MQTT_CA_CERT`, and give each node its own credentials and ACLs on the broker.
+- **Broker access.** Only the nodes added with `./broker.sh` can connect, each one with its own password. To use a broker outside this project, set `MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME` and `MQTT_PASSWORD`, plus `MQTT_TLS=true` and `MQTT_CA_CERT` if it uses TLS.
 
 ## Receiving fixes from the team
 

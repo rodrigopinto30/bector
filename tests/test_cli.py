@@ -576,7 +576,54 @@ def test_a_sharing_failure_keeps_the_applied_fix(
     assert "applied    2 files changed" in unreachable.stdout
 
 
-def test_doctor_reports_whether_sharing_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+class FakeBroker:
+    """Stands in for the broker check of ``healer doctor``."""
+
+    def __init__(self, refusal: str | None = None) -> None:
+        self.refusal = refusal
+
+    def check(self) -> None:
+        if self.refusal is not None:
+            raise SharingError(self.refusal)
+
+
+@pytest.fixture
+def broker(monkeypatch: pytest.MonkeyPatch) -> Callable[[str | None], None]:
+    """Make ``healer doctor`` see a broker that accepts this node, or one that refuses it."""
+
+    def use(refusal: str | None = None) -> None:
+        monkeypatch.setattr(cli, "build_publisher", lambda _: FakeBroker(refusal))
+
+    use()
+    return use
+
+
+def test_doctor_reports_whether_the_broker_accepts_this_node(
+    monkeypatch: pytest.MonkeyPatch, broker: Callable[[str | None], None]
+) -> None:
+    monkeypatch.setenv("MQTT_USERNAME", "laptop-ana")
+    accepted = runner.invoke(cli.app, ["doctor"])
+    assert "[ok]   MQTT broker 127.0.0.1:1 accepts laptop-ana" in accepted.stdout
+
+    broker("the broker refused the connection: Not authorized")
+    refused = runner.invoke(cli.app, ["doctor"])
+    assert refused.exit_code == 1
+    assert (
+        "[fail] MQTT broker 127.0.0.1:1: the broker refused the connection: Not authorized"
+        in refused.stdout
+    )
+    assert "./start.sh creates them" not in refused.stdout
+
+    monkeypatch.delenv("MQTT_USERNAME")
+    anonymous = runner.invoke(cli.app, ["doctor"])
+    assert "MQTT_USERNAME and MQTT_PASSWORD are not set: ./start.sh creates them" in (
+        anonymous.stdout
+    )
+
+
+def test_doctor_reports_whether_sharing_is_ready(
+    monkeypatch: pytest.MonkeyPatch, broker: Callable[[str | None], None]
+) -> None:
     assert "[info] sharing: off" in runner.invoke(cli.app, ["doctor"]).stdout
     monkeypatch.setenv("SHARE_SOLUTIONS", "true")
     missing = runner.invoke(cli.app, ["doctor"])
