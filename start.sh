@@ -57,6 +57,9 @@ fi
 WORKSPACE_PATH="$(grep -E '^WORKSPACE_PATH=' .env | cut -d= -f2- || true)"
 mkdir -p "${WORKSPACE_PATH:-./workspace}"
 
+log "Preparing the broker credentials of this machine..."
+./broker.sh local
+
 log "Building and starting services..."
 $DOCKER compose up -d --build
 
