@@ -4,6 +4,8 @@ x-healer: &healer
   environment:
     MQTT_HOST: ${MQTT_HOST:-mosquitto}
     MQTT_PORT: ${MQTT_PORT:-1883}
+    SANDBOX_SOCKET: /sandbox/run/runner.sock
+    SANDBOX_DIR: /sandbox/copies
     CHROMA_PATH: /data/chroma
     LEDGER_PATH: /data/healer/ledger.sqlite3
   volumes:
@@ -12,9 +14,11 @@ x-healer: &healer
     - chroma-models:/root/.cache/chroma
     - healer-data:/data/healer
     - ${WORKSPACE_PATH:-./workspace}:/workspace
+    - sandbox-work:/sandbox
   working_dir: /workspace
   depends_on:
     - mosquitto
+    - sandbox
   restart: unless-stopped
 
 services:
@@ -44,6 +48,31 @@ services:
     <<: *healer
     container_name: healer-cli
 
+  # Runs the tests of the copies, away from the secrets and files of the cli container:
+  # no network, no .env, no workspace or data volumes, a read-only filesystem and only the
+  # capabilities it needs to hand a copy over and run its command as an unprivileged user.
+  sandbox:
+    build: .
+    container_name: healer-sandbox
+    command: ["python", "-m", "healer.adapters.sandbox_server"]
+    environment:
+      SANDBOX_SOCKET: /sandbox/run/runner.sock
+      SANDBOX_DIR: /sandbox/copies
+    volumes:
+      - sandbox-work:/sandbox
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    pids_limit: 512
+    mem_limit: ${SANDBOX_MEMORY:-2g}
+    cpus: ${SANDBOX_CPUS:-2}
+    restart: unless-stopped
+
   listener:
     <<: *healer
     container_name: healer-listener
@@ -56,3 +85,12 @@ volumes:
   chroma-data:
   chroma-models:
   healer-data:
+  # The copies live in memory, capped at SANDBOX_DISK, so a run cannot fill the host's disk.
+  # ./stop.sh removes it, so a new SANDBOX_DISK applies on the next start.
+  sandbox-work:
+    name: healer-sandbox-work
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=${SANDBOX_DISK:-2g},mode=0755"

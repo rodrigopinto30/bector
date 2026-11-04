@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. What is still missing concerns the code that runs during the tests and how the project is built and checked.
+All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. What is still missing concerns the containers' users and how the project is built and checked.
 
 | Phase | What it delivers | Status |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ All five development phases are implemented. The broker requires a password per 
 
 **Still pending:**
 
-- **Real isolation for tests.** The container runs as root, and code under test can reach the network, the mounted workspace and the credentials of the running process. This is why team suggestions need your approval before they run.
+- **Non-root containers.** The `cli` container still runs as root. The tests no longer run there, but in the sandbox, which runs them as an unprivileged user.
 - **Reproducible builds.** Dependency versions are minimum bounds, and there is no lock file.
 - **CI.** There is no pipeline yet: ruff, mypy and pytest are run by hand, and there is no dependency audit.
 
@@ -100,6 +100,7 @@ To stop everything:
 | Service | Container | Purpose |
 | --- | --- | --- |
 | `cli` | `healer-cli` | Where the `healer` command runs. |
+| `sandbox` | `healer-sandbox` | Runs the tests of each copy, with no network, no secrets and no access to your files. |
 | `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. Only the nodes added with `./broker.sh` can connect. |
 | `listener` | `healer-listener` | Optional. Runs `healer listen` in the background; it only starts with the `team` profile. |
 
@@ -110,7 +111,7 @@ The project you want to analyze goes in the `workspace/` folder, which is mounte
 ### Verify that everything works
 
 ```bash
-docker compose ps                          # both containers should be "Up"
+docker compose ps                          # cli, mosquitto and sandbox should be "Up"
 docker compose exec cli healer doctor      # the dependency checks should be [ok]
 docker compose exec -w /app cli pytest     # run the test suite
 ```
@@ -192,7 +193,7 @@ docker compose exec cli healer diagnose error.log --json
 
 ## Sandbox runner: run the tests on an isolated copy
 
-`healer test` copies the workspace to a private temporary directory, runs the test command there, diagnoses the failures and deletes the copy. Your files are never modified.
+`healer test` copies the workspace to a private temporary directory, runs the test command there in the test sandbox, diagnoses the failures and deletes the copy. Your files are never modified.
 
 ```bash
 docker compose exec cli healer test                                      # runs TEST_COMMAND (python -m pytest)
@@ -212,7 +213,10 @@ result     tests failed (exit 1) in 1.3s
 
 - **Allowlist:** only commands that start with an entry of `ALLOWED_TEST_COMMANDS` run (default `pytest` and `python -m pytest`). There is no shell, so `;`, `&&` or `|` are plain arguments. Arguments with absolute paths, `~` or `..` are rejected, because they would read or write outside the copy.
 - **Limits:** the run is killed after `TEST_TIMEOUT_SECONDS` (default 300) together with every process it started; output is capped at `MAX_OUTPUT_BYTES` (default 1 MB, keeping the end); workspaces over `MAX_SANDBOX_BYTES` (default 500 MB) are refused.
-- **Clean environment:** the tests only see `PATH`, `HOME`, locale and terminal variables, so credentials such as `ANTHROPIC_API_KEY` are not passed to them. This is not a security boundary: the tests run as the same user and can still read what that user can, including the environment of the running process.
+- **The test sandbox.** The copy is placed in a volume shared with the `sandbox` container, and the command runs there, not in `cli`. That container has no network, no `.env`, no access to the workspace or the data volumes, and a read-only filesystem. A run gets at most 512 processes, `SANDBOX_CPUS` cores (2) and `SANDBOX_MEMORY` of memory (2 GB), and the copies live in memory, in at most `SANDBOX_DISK` of space (2 GB), so a run cannot fill the host's disk. The command runs as an unprivileged user with a clean environment. Copies waiting for their turn stay readable only by root, and after every run the processes the command left behind are killed and `/tmp` is emptied, so one run cannot affect the next. `healer doctor` says whether the sandbox answers.
+- **Without the sandbox** (`SANDBOX_SOCKET` unset, as outside Docker), the command runs in the same container with a clean environment. That keeps credentials out of reach of ordinary code, not of code that looks for them: it runs as the same user and can read what that user can.
+- **What the tests print is shown with control characters masked,** with `--output` and in the diagnoses, so the code under test cannot forge lines in your terminal.
+- The sandbox runs the code baked into its image, not the mounted project, because mounting the project would expose `.env`. After changing the code, `./start.sh` rebuilds it. `./stop.sh` deletes the copies volume, so a new `SANDBOX_DISK` applies on the next start.
 - **What is copied:** files and symlinks (as links, never followed). `.git`, virtual environments, `node_modules`, build output and caches are skipped.
 - **Exit codes:** `0` when the tests pass, `1` when they fail or time out, `2` when the command is not allowed or cannot start.
 - Prefer `python -m pytest` over `pytest`: it adds the project root to the import path, so `from app import ...` works without extra configuration.
@@ -520,18 +524,13 @@ evidence   python -m pytest
 
 ## Using the team's fixes
 
-Between the local cache and Claude, `healer run` looks for what the team already solved. A fix that works here costs **zero tokens**. Before any of it runs, you see it and decide:
+Between the local cache and Claude, `healer run` looks for what the team already solved. A fix that works here costs **zero tokens**. Each suggestion is tested in the test sandbox, and nothing is written to your files until you accept it:
 
 ```text
-team       suggestion from laptop-ana, received 2026-11-02 10:38
+team       suggestion from laptop-ana, received 2026-11-04 12:28
 fixes      KeyError: 'db' (same signature)
 proposal   Default the database name and tolerate an address without a port.
-
---- app/cfg.py
--     return config["db"]
-+     return config.get("db", "postgres")
-
-test this suggestion on a copy? Its code will run on this machine with your access [y/N]: y
+sandbox    testing it in the test sandbox, with no network, secrets or files
 
 attempt 1  suggestion from laptop-ana, 0 tokens
 patch      2 files (+3 -2)
@@ -541,7 +540,8 @@ verdict    fixed: the tests pass here with the fix from laptop-ana
 spent      1 attempt, 0 tokens in, 0 out; saved about 2040 tokens
 ```
 
-- **Read it before you say yes.** Testing a suggestion executes code written on another machine. The copy keeps a wrong patch away from your files, but it does not contain hostile code: the tests run with this user's access, can reach the network, the mounted workspace and the credentials of the running process. Approving a suggestion trusts its author as much as running a teammate's branch. Without an answer, as in a script, nothing from the team runs.
+- **Tested in the sandbox, at once.** Testing a suggestion executes code written on another machine. In the test sandbox that code has no network, no secrets and no access to your files, so it runs without asking. The sandbox cannot tell a fair fix from one that only fools the tests, so read the diff before applying it.
+- **Without the sandbox, it asks first.** When the tests run in this container (`SANDBOX_SOCKET` unset, as outside Docker), every edit is shown first and the question warns that the code will run with your access: `test this suggestion on a copy? Its code will run on this machine with your access [y/N]`. Without an answer, as in a script, nothing from the team runs.
 - **What counts as a match.** A suggestion with the same error signature, or one for an error of the same type whose summary is almost identical (`TEAM_MAX_DISTANCE`, 0.1). At most `TEAM_MAX_SUGGESTIONS` (3) are offered per run. The signature ignores concrete values, so check the error shown next to `fixes`.
 - **Applying is a separate decision.** The fix is shown again as a diff and needs its own yes. `--apply` does not cover fixes from the team; `--no-apply` does.
 - **A suggestion that fails is not recommended,** and the next source is tried. It stays stored, because it may fit another project of this node. Declining one has the same effect.

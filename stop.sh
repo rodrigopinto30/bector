@@ -16,3 +16,7 @@ else
   echo "[stop] Stopping services..."
   $DOCKER compose --profile team down --remove-orphans
 fi
+
+# The copies volume lives in memory and holds nothing worth keeping. Docker keeps an
+# existing volume as it was created, so removing it lets a new SANDBOX_DISK apply.
+$DOCKER volume rm healer-sandbox-work >/dev/null 2>&1 || true

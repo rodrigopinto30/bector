@@ -61,6 +61,13 @@ def no_sharing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MQTT_PORT", "1")
 
 
+@pytest.fixture(autouse=True)
+def tests_run_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests run their own commands in this container; the sandbox has its own tests."""
+    monkeypatch.delenv("SANDBOX_SOCKET", raising=False)
+    monkeypatch.delenv("SANDBOX_DIR", raising=False)
+
+
 @pytest.fixture
 def fake_embeddings() -> FakeEmbeddingFunction:
     return FakeEmbeddingFunction()
