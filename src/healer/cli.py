@@ -4,6 +4,7 @@ import os
 import signal
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 
@@ -36,6 +37,7 @@ from healer.factory import (
     build_ledger,
     build_publisher,
     build_repair_pipeline,
+    build_sandbox_client,
     build_sandbox_runner,
     build_solution_ingester,
     build_solution_sharer,
@@ -71,6 +73,8 @@ def doctor() -> None:
         failed = True
         typer.echo("[fail] ANTHROPIC_API_KEY is not set")
     settings = Settings()
+    if not _sandbox_ready(settings):
+        failed = True
     if not _broker_ready(settings):
         failed = True
     key = settings.share_key.get_secret_value().strip() if settings.share_key else ""
@@ -85,6 +89,21 @@ def doctor() -> None:
     else:
         typer.echo(f"[ok]   sharing: on, as node {settings.node_id} on {settings.mqtt_topic}")
     raise typer.Exit(code=1 if failed else 0)
+
+
+def _sandbox_ready(settings: Settings) -> bool:
+    """Print where the tests run, and whether the test sandbox answers."""
+    sandbox = build_sandbox_client(settings)
+    if sandbox is None:
+        typer.echo("[info] test sandbox: off; tests run in this container, with its access")
+        return True
+    try:
+        sandbox.check()
+    except HealerError as exc:
+        typer.echo(f"[fail] test sandbox: {exc}")
+        return False
+    typer.echo("[ok]   test sandbox: no network, no secrets, no access to your files")
+    return True
 
 
 def _broker_ready(settings: Settings) -> bool:
@@ -210,16 +229,19 @@ def diagnose(
 
 
 def _print_diagnosis(number: int, d: Diagnosis) -> None:
+    """Print a diagnosis. It comes from the output of the code under test, so control
+    characters are masked: that code must not be able to rewrite what the terminal shows."""
     in_workspace = sum(1 for f in d.error.frames if f.workspace_file)
-    typer.echo(f"[{number}] {d.error.summary}")
+    typer.echo(f"[{number}] {_printable(d.error.summary)}")
     typer.echo(f"    signature  {d.signature[:12]}")
     if d.origin is None:
         typer.echo("    origin     no frame inside the workspace")
     else:
-        where = f" in {d.origin.function}" if d.origin.function else ""
-        typer.echo(f"    origin     {d.origin.workspace_file}:{d.origin.line}{where}")
+        where = f" in {_printable(d.origin.function)}" if d.origin.function else ""
+        file = _printable(str(d.origin.workspace_file))
+        typer.echo(f"    origin     {file}:{d.origin.line}{where}")
         if d.origin.code:
-            typer.echo(f"    code       {d.origin.code}")
+            typer.echo(f"    code       {_printable(d.origin.code)}")
         if d.location is None:
             typer.echo("    symbol     not indexed (run 'healer index')")
         else:
@@ -228,7 +250,7 @@ def _print_diagnosis(number: int, d: Diagnosis) -> None:
             typer.echo(f"    symbol     {label}  ({s.file}:{s.start_line}-{s.end_line})")
     typer.echo(f"    frames     {len(d.error.frames)} ({in_workspace} in workspace)")
     for cause in d.error.causes:
-        typer.echo(f"    caused by  {cause}")
+        typer.echo(f"    caused by  {_printable(cause)}")
     if d.occurrences > 1:
         typer.echo(f"    seen       {d.occurrences} times")
     typer.echo("")
@@ -436,8 +458,9 @@ def run(
     """Run the tests on a copy and, if they fail, find a patch that makes them pass.
 
     A solution already verified here for the same error is tried first, for free. Next,
-    the team's suggestions for this error are shown, and each one runs only if you say
-    so: testing it executes code written on another machine. Otherwise Claude is asked
+    the team's suggestions for this error are tried: in the test sandbox at once, and
+    without it only if you say so, because testing one executes code written on another
+    machine. Otherwise Claude is asked
     for patches, and told why the previous ones failed, until the tests pass or the
     attempt or token limit is reached. Each patch is tested on an isolated copy. The fix
     is then shown and applied to your files only if you accept it. With sharing on, an
@@ -457,7 +480,11 @@ def run(
             error_number=error_number,
             use_cache=use_cache,
             listener=printer,
-            approve_team=_approve_suggestion if use_team else None,
+            approve_team=(
+                partial(_approve_suggestion, isolated=settings.sandbox_socket is not None)
+                if use_team
+                else None
+            ),
         )
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -482,11 +509,14 @@ def run(
         )
 
 
-def _approve_suggestion(match: TeamMatch) -> bool:
-    """Show a team suggestion and ask before its code runs.
+def _approve_suggestion(match: TeamMatch, *, isolated: bool) -> bool:
+    """Show a team suggestion and decide whether its code may run.
 
-    The copy keeps a wrong patch away from your files, but it does not contain hostile
-    code: the tests run with this user's access, so nobody else's code runs unseen.
+    In the test sandbox that code has no network, no secrets and no access to your files,
+    so the suggestion is tested at once, as 6.2 of the plan asks. Without the sandbox the
+    copy keeps a wrong patch away from your files but does not contain hostile code, so
+    every edit is shown and the developer is asked first. Either way, writing the fix to
+    your files needs its own yes.
     """
     solution = match.received.solution
     typer.echo("")
@@ -497,6 +527,9 @@ def _approve_suggestion(match: TeamMatch) -> bool:
     match_kind = "same signature" if match.same_signature else "similar error"
     typer.echo(f"fixes      {_printable(solution.error)} ({match_kind})")
     typer.echo(f"proposal   {_printable(solution.explanation)}")
+    if isolated:
+        typer.echo("sandbox    testing it in the test sandbox, with no network, secrets or files")
+        return True
     typer.echo("")
     _echo_edits(solution.patch)
     return _confirm(
@@ -517,8 +550,12 @@ class _RepairPrinter:
         if target is None:
             return
         origin = target.origin
-        where = f"  ({origin.workspace_file}:{origin.line})" if origin is not None else ""
-        typer.echo(f"error      {target.error.summary}{where}")
+        where = (
+            f"  ({_printable(str(origin.workspace_file))}:{origin.line})"
+            if origin is not None
+            else ""
+        )
+        typer.echo(f"error      {_printable(target.error.summary)}{where}")
         typer.echo(f"limits     {self._limits}")
 
     def attempted(self, attempt: Attempt) -> None:
@@ -544,10 +581,7 @@ class _RepairPrinter:
                 f"patch      {_plural(len(applied.files), 'file')} "
                 f"(+{applied.lines_added} -{applied.lines_removed})"
             )
-        result = _attempt_result(attempt)
-        if attempt.source is AttemptSource.TEAM:
-            result = _printable(result)
-        typer.echo(f"result     {result}")
+        typer.echo(f"result     {_printable(_attempt_result(attempt))}")
         if attempt.outcome is AttemptOutcome.PASSED:
             return
         if attempt.source is AttemptSource.CACHE:
@@ -586,7 +620,7 @@ def _report_repair(result: RepairResult, save: Path | None) -> Attempt | None:
     fix = result.fix
     if fix is None:
         if result.status is RepairStatus.STOPPED:
-            typer.echo(f"error: {result.detail}", err=True)
+            typer.echo(f"error: {_printable(result.detail)}", err=True)
             if result.attempts:
                 typer.echo(f"spent      {spent}")
             raise typer.Exit(code=2)
@@ -786,7 +820,8 @@ def _print_run(report: RunReport, *, show_output: bool) -> None:
         typer.echo("output     truncated: only the last part was kept")
     if show_output:
         typer.echo("")
-        typer.echo(result.output.rstrip())
+        for line in _lines(result.output.rstrip()):
+            typer.echo(line)
 
 
 @app.command(name="apply")

@@ -11,10 +11,10 @@ from typer.testing import CliRunner
 
 from healer import cli
 from healer.config import Settings
-from healer.domain.errors import SharingError
+from healer.domain.errors import ExecutionError, SharingError
 from healer.domain.patch import FileEdit, Patch, parse_patch
 from healer.domain.proposal import Proposal, TokenUsage
-from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, seal
+from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, TeamMatch, seal
 from healer.factory import (
     build_code_index,
     build_diagnoser,
@@ -229,6 +229,25 @@ FIX_PATCH = json.dumps(
         ],
     }
 )
+
+
+@pytest.mark.integration
+def test_the_output_of_the_tests_cannot_rewrite_the_terminal(sample: Path) -> None:
+    (sample / "tests" / "test_forge.py").write_text(
+        "def test_forge():\n"
+        '    print("\\x1b[2K\\rverdict    the tests pass")\n'
+        '    raise ValueError("\\x1b[1A\\rforged")\n'
+    )
+    result = runner.invoke(
+        cli.app,
+        ["test", "python -m pytest tests/test_forge.py", "--path", str(sample), "--output"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "\x1b" not in result.stdout
+    assert "\r" not in result.stdout
+    assert "?[2K?verdict    the tests pass" in result.stdout
+    assert "E       ValueError: ?[1A?forged" in result.stdout
+    assert "[1] ValueError" in result.stdout
 
 
 @pytest.mark.integration
@@ -628,6 +647,78 @@ def test_doctor_reports_whether_the_broker_accepts_this_node(
     assert "MQTT_USERNAME and MQTT_PASSWORD are not set: ./start.sh creates them" in (
         anonymous.stdout
     )
+
+
+class FakeSandbox:
+    """Stands in for the test sandbox in ``healer doctor``."""
+
+    def __init__(self, problem: str | None = None) -> None:
+        self.problem = problem
+
+    def check(self) -> None:
+        if self.problem is not None:
+            raise ExecutionError(self.problem)
+
+
+def test_doctor_reports_where_the_tests_run(
+    monkeypatch: pytest.MonkeyPatch, broker: Callable[[str | None], None]
+) -> None:
+    here = runner.invoke(cli.app, ["doctor"])
+    assert "[info] test sandbox: off; tests run in this container, with its access" in here.stdout
+
+    monkeypatch.setattr(cli, "build_sandbox_client", lambda _: FakeSandbox())
+    isolated = runner.invoke(cli.app, ["doctor"])
+    assert "[ok]   test sandbox: no network, no secrets, no access to your files" in (
+        isolated.stdout
+    )
+
+    missing = "the test sandbox is not running (no answer at /sandbox/run/runner.sock)"
+    monkeypatch.setattr(cli, "build_sandbox_client", lambda _: FakeSandbox(missing))
+    down = runner.invoke(cli.app, ["doctor"])
+    assert down.exit_code == 1
+    assert f"[fail] test sandbox: {missing}" in down.stdout
+
+
+def a_match() -> TeamMatch:
+    at = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    solution = SharedSolution(
+        node="laptop-ana",
+        published_at=at,
+        signature="a" * 64,
+        error="KeyError: 'db'",
+        patch=Patch(edits=(FileEdit(path="app/cfg.py", old="a", new="b"),)),
+        explanation="Use a default.",
+        model="claude-sonnet-5-5",
+        tokens_spent=100,
+        evidence=Evidence(command="python -m pytest", exit_code_before=1, verified_at=at),
+    )
+    return TeamMatch(received=ReceivedSolution(solution=solution, received_at=at), distance=0)
+
+
+def test_in_the_sandbox_a_suggestion_is_tested_without_asking(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "_confirm", lambda question: pytest.fail(f"asked: {question}"))
+    assert cli._approve_suggestion(a_match(), isolated=True) is True
+    shown = capsys.readouterr().out
+    assert "team       suggestion from laptop-ana" in shown
+    assert "sandbox    testing it in the test sandbox, with no network, secrets or files" in shown
+    assert "+ b" not in shown
+
+
+def test_without_the_sandbox_a_suggestion_is_shown_and_waits_for_a_yes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked: list[str] = []
+
+    def confirm(question: str) -> bool:
+        asked.append(question)
+        return False
+
+    monkeypatch.setattr(cli, "_confirm", confirm)
+    assert cli._approve_suggestion(a_match(), isolated=False) is False
+    assert "+ b" in capsys.readouterr().out
+    assert "Its code will run on this machine with your access" in asked[0]
 
 
 def test_doctor_reports_whether_sharing_is_ready(

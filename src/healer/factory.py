@@ -17,6 +17,7 @@ from healer.adapters.mqtt_publisher import MqttPublisher
 from healer.adapters.mqtt_subscriber import MqttSubscriber
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
+from healer.adapters.sandbox_client import SandboxServiceRunner
 from healer.adapters.sqlite_ledger import SqliteLedger
 from healer.adapters.subprocess_runner import SubprocessRunner
 from healer.adapters.tempdir_sandbox import TempDirSandboxProvider
@@ -26,7 +27,7 @@ from healer.config import Settings
 from healer.domain.errors import LLMError, SharingError
 from healer.domain.execution import CommandPolicy
 from healer.domain.patch import PatchPolicy
-from healer.domain.ports import PatchProposer, SolutionPublisher
+from healer.domain.ports import CommandRunner, PatchProposer, SolutionPublisher
 from healer.domain.proposal import Proposal
 from healer.domain.redaction import Redactor
 from healer.pipeline.repair import RepairPipeline
@@ -73,15 +74,36 @@ def build_sandbox_runner(
     *,
     timeout_seconds: float | None = None,
 ) -> SandboxRunner:
-    provider = TempDirSandboxProvider(workspace, max_bytes=settings.max_sandbox_bytes)
-    runner = SubprocessRunner(
-        timeout_seconds=timeout_seconds or settings.test_timeout_seconds,
-        max_output_bytes=settings.max_output_bytes,
+    provider = TempDirSandboxProvider(
+        workspace, max_bytes=settings.max_sandbox_bytes, base_dir=settings.sandbox_dir
     )
+    timeout = timeout_seconds or settings.test_timeout_seconds
+    runner: CommandRunner
+    if settings.sandbox_socket is not None:
+        runner = SandboxServiceRunner(
+            settings.sandbox_socket,
+            timeout_seconds=timeout,
+            max_output_bytes=settings.max_output_bytes,
+        )
+    else:
+        runner = SubprocessRunner(
+            timeout_seconds=timeout, max_output_bytes=settings.max_output_bytes
+        )
     policy = CommandPolicy(settings.allowed_test_commands)
     diagnoser = build_diagnoser(workspace, settings, embedding_function)
     applier = FilesystemPatcher(max_changed_lines=settings.max_patch_changed_lines)
     return SandboxRunner(provider, runner, policy, diagnoser, applier, _patch_policy(settings))
+
+
+def build_sandbox_client(settings: Settings) -> SandboxServiceRunner | None:
+    """The test sandbox, or None when the tests run in this container."""
+    if settings.sandbox_socket is None:
+        return None
+    return SandboxServiceRunner(
+        settings.sandbox_socket,
+        timeout_seconds=settings.test_timeout_seconds,
+        max_output_bytes=settings.max_output_bytes,
+    )
 
 
 def build_fix_installer(workspace: Path, settings: Settings) -> FixInstaller:

@@ -62,6 +62,9 @@ class TempDirSandboxProvider:
         self._base_dir = base_dir
 
     def create(self) -> TempDirSandbox:
+        """A new copy, readable only by its owner until something hands it over."""
+        if self._base_dir is not None:
+            self._base_dir.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix="healer-sandbox-", dir=self._base_dir))
         try:
             files = self._copy(root)

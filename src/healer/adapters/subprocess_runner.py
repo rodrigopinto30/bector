@@ -5,7 +5,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import IO
 
@@ -21,9 +21,11 @@ class SubprocessRunner:
     """Runs a command in its own process group so a timeout also kills its children.
 
     The child gets a minimal environment, so credentials such as ``ANTHROPIC_API_KEY`` are
-    not handed to the code under test. This is not a security boundary: that code runs as
-    the same user and can still read what this user can, including this process's
-    environment through ``/proc``.
+    not handed to the code under test. On its own this is not a security boundary: that
+    code runs as the same user and can still read what this user can, including this
+    process's environment through ``/proc``. The test sandbox adds that boundary: it runs
+    this class in another container, as another user (``user``), and ``after_exit`` kills
+    whatever the command left running before its output is collected.
     """
 
     def __init__(
@@ -32,10 +34,15 @@ class SubprocessRunner:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         environ: Mapping[str, str] | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        user: int | None = None,
+        after_exit: Callable[[], None] | None = None,
     ) -> None:
         self._timeout = timeout_seconds
         self._max_output = max_output_bytes
-        self._env = _safe_env(os.environ if environ is None else environ)
+        self._env = {**_safe_env(os.environ if environ is None else environ), **(extra_env or {})}
+        self._user = user
+        self._after_exit = after_exit
 
     def run(self, argv: Sequence[str], cwd: Path) -> RunResult:
         start = time.monotonic()
@@ -48,6 +55,9 @@ class SubprocessRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                user=self._user,
+                group=self._user,
+                extra_groups=[] if self._user is not None else None,
             )
         except OSError as exc:
             raise ExecutionError(f"Cannot start {argv[0]!r}: {exc.strerror}") from exc
@@ -62,6 +72,8 @@ class SubprocessRunner:
             timed_out = True
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+        if self._after_exit is not None:
+            self._after_exit()
         reader.join(timeout=5)
         return RunResult(
             command=tuple(argv),
