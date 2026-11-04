@@ -1,6 +1,7 @@
 """``SolutionSubscriber`` over MQTT (paho): a durable subscription that keeps itself alive."""
 
 import logging
+import ssl
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 
+from healer.adapters.mqtt_tls import tls_failure, use_tls
 from healer.domain.errors import SharingError
 
 logger = logging.getLogger(__name__)
@@ -19,8 +21,8 @@ class MqttSubscriber:
 
     That makes the subscription durable: once this node has subscribed, the broker keeps
     what is published while it is off and delivers it on the next connection. Lost
-    connections are retried with growing delays (7.6); a broker that refuses this node
-    ends ``run``, because retrying would not help.
+    connections are retried with growing delays (7.6). A broker that refuses this node, or a
+    first TLS handshake that fails, ends ``run``, because retrying would not help.
     """
 
     def __init__(
@@ -97,7 +99,13 @@ class MqttSubscriber:
         client.on_disconnect = lost
         client.on_connect_fail = failed
         client.on_message = received
-        client.connect_async(self._host, self._port, keepalive=self._keepalive)
+        try:
+            client.connect(self._host, self._port, keepalive=self._keepalive)
+        except ssl.SSLError as exc:
+            raise tls_failure(self._host, self._port, exc) from exc
+        except (OSError, ValueError):
+            report(f"cannot reach {self._host}:{self._port}; retrying")
+            client.connect_async(self._host, self._port, keepalive=self._keepalive)
         client.loop_start()
         try:
             self._stopped.wait()
@@ -119,5 +127,5 @@ class MqttSubscriber:
         if self._username is not None:
             client.username_pw_set(self._username, self._password)
         if self._tls:
-            client.tls_set(ca_certs=str(self._ca_cert) if self._ca_cert else None)
+            use_tls(client, self._ca_cert)
         return client

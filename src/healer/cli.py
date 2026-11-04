@@ -102,7 +102,8 @@ def _broker_ready(settings: Settings) -> bool:
                 "machine gives them for its broker"
             )
         return False
-    typer.echo(f"[ok]   MQTT broker {address} accepts {user or 'anonymous clients'}")
+    over = " over TLS" if settings.mqtt_tls else ""
+    typer.echo(f"[ok]   MQTT broker {address} accepts {user or 'anonymous clients'}{over}")
     return True
 
 

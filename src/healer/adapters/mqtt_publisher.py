@@ -2,6 +2,7 @@
 
 import logging
 import secrets
+import ssl
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -12,6 +13,7 @@ from typing import Any
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 
+from healer.adapters.mqtt_tls import tls_failure, use_tls
 from healer.domain.errors import SharingError
 
 logger = logging.getLogger(__name__)
@@ -23,8 +25,9 @@ class MqttPublisher:
     Each connection uses ``client_id`` plus a random suffix, so two runs on the same node
     never take over each other's session.
 
-    Network failures are retried with exponential backoff; a broker that refuses the
-    connection (bad credentials, ACLs) is not, because retrying would not help.
+    Network failures are retried with exponential backoff. A broker that refuses the
+    connection (bad credentials, ACLs) or a TLS handshake that fails (wrong CA, a host the
+    certificate does not name, a port without TLS) is not, because retrying would not help.
     """
 
     def __init__(
@@ -105,7 +108,7 @@ class MqttPublisher:
         if self._username is not None:
             client.username_pw_set(self._username, self._password)
         if self._tls:
-            client.tls_set(ca_certs=str(self._ca_cert) if self._ca_cert else None)
+            use_tls(client, self._ca_cert)
         connected = threading.Event()
         refused: list[str] = []
 
@@ -117,6 +120,8 @@ class MqttPublisher:
         client.on_connect = on_connect
         try:
             client.connect(self._host, self._port, keepalive=max(int(self._timeout), 5))
+        except ssl.SSLError as exc:
+            raise tls_failure(self._host, self._port, exc) from exc
         except (OSError, ValueError) as exc:
             raise _RetryableError(str(exc) or type(exc).__name__) from exc
         client.loop_start()

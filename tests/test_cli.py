@@ -91,6 +91,15 @@ def test_index_of_missing_directory_reports_error(tmp_path: Path) -> None:
     assert "not a directory" in result.output
 
 
+def test_an_empty_setting_means_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MQTT_CA_CERT", "")
+    monkeypatch.setenv("MQTT_USERNAME", "")
+    monkeypatch.setenv("REPAIR_MAX_ATTEMPTS", "")
+    settings = Settings()
+    assert (settings.mqtt_ca_cert, settings.mqtt_username) == (None, None)
+    assert settings.repair_max_attempts == 3
+
+
 def test_settings_ignore_unrelated_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORKSPACE_PATH", "./workspace")
     monkeypatch.setenv("MQTT_PORT", "1884")
