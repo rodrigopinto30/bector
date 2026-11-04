@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-All five development phases are implemented. The system is ready to use on one machine or on a trusted local network, but not yet between machines on an untrusted network.
+All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. What is still missing concerns the code that runs during the tests and how the project is built and checked.
 
 | Phase | What it delivers | Status |
 | --- | --- | --- |
@@ -22,9 +22,8 @@ All five development phases are implemented. The system is ready to use on one m
 | 4. Self-correction loop | Isolated test runs, patches, secret redaction, proposals from Claude, retries, local cache and token ledger | Done |
 | 5. Recommendation and team sync | Applying fixes with your approval, then sharing, receiving and reusing them across machines | Done |
 
-**Still pending before using it across machines:**
+**Still pending:**
 
-- **Broker encryption.** The broker requires a user and password per node and limits each one to the team topic, but there is no TLS yet: on a network, passwords and messages travel unencrypted. Until then, open the broker only on a trusted network.
 - **Real isolation for tests.** The container runs as root, and code under test can reach the network, the mounted workspace and the credentials of the running process. This is why team suggestions need your approval before they run.
 - **Reproducible builds.** Dependency versions are minimum bounds, and there is no lock file.
 - **CI.** There is no pipeline yet: ruff, mypy and pytest are run by hand, and there is no dependency audit.
@@ -416,11 +415,39 @@ NODE_ID=laptop-luis
 ```
 
 - **This machine needs nothing.** The first time, `./start.sh` writes its `MQTT_USERNAME` and `MQTT_PASSWORD` at the end of `.env` and adds it to the broker. `healer doctor` says whether the broker accepts it.
-- **Private by default.** The broker only listens on this machine (`127.0.0.1`). To let the other machines in, set `BROKER_BIND=0.0.0.0` in `.env` and run `./stop.sh && ./start.sh`. There is no TLS yet, so do this only on a trusted network: passwords and messages travel unencrypted.
-- **Using the broker of another machine.** On the machine with the broker, run `./broker.sh add` with the new machine's `NODE_ID`. Copy the lines it prints into the new machine's `.env`, with `MQTT_HOST` set to the broker machine's address, and run `./stop.sh && ./start.sh` there. Its own broker is then left alone.
+- **Private by default.** The broker only listens on this machine (`127.0.0.1`): port 1883 without encryption and, once TLS is on, port 8883 with it. Opening a port to the network is an explicit choice: TLS, below, for any network, or `BROKER_BIND=0.0.0.0` for the plain port, only on a trusted network, because passwords and messages travel unencrypted there.
+- **Using the broker of another machine.** On the machine with the broker, run `./broker.sh add` with the new machine's `NODE_ID`. Copy the lines it prints into the new machine's `.env` (with TLS off, set `MQTT_HOST` to the broker machine's address) and run `./stop.sh && ./start.sh` there. Its own broker is then left alone.
 - **One password per machine.** One machine can be revoked without changing the others. Adding or removing a machine applies at once, and the rest stay connected.
 - **What it does not prevent.** A node that may connect can still publish messages claiming to come from another node, or take over another node's durable session by reusing its client name. The team key (`SHARE_KEY`) still decides which messages are accepted.
-- `./stop.sh --clean` also deletes the broker's users. `./start.sh` adds this machine again; the others must be added again.
+- `./stop.sh --clean` also deletes the broker's users and its TLS certificates. `./start.sh` adds this machine again; the others must be added again, and TLS turned on again with a new team CA.
+
+### Encryption with TLS
+
+To let other machines in over a network you do not fully trust, turn TLS on, on the machine with the broker, with the address the others use to reach it:
+
+```bash
+./broker.sh tls 192.168.1.20     # create the team CA and the broker's certificate; writes team-ca.crt here
+./broker.sh add laptop-luis      # now prints the TLS settings for that machine
+```
+
+Then set `BROKER_TLS_BIND=0.0.0.0` in `.env` and run `./stop.sh && ./start.sh`. On the other machine, copy `team-ca.crt` into its project folder and add the lines that `./broker.sh add` printed to its `.env`:
+
+```text
+MQTT_HOST=192.168.1.20
+MQTT_PORT=8883
+MQTT_TLS=true
+MQTT_CA_CERT=/app/team-ca.crt
+MQTT_USERNAME=laptop-luis
+MQTT_PASSWORD=...
+NODE_ID=laptop-luis
+```
+
+- **Only the team's broker is trusted.** Each machine checks the broker's certificate against `team-ca.crt`, and the address in `MQTT_HOST` must be one of those given to `./broker.sh tls` (plus `mosquitto`, `localhost` and `127.0.0.1`). A server that cannot prove it is the team's broker is refused, so nobody can collect the passwords by pretending to be it.
+- **TLS 1.2 or later**, and the password is still required inside it.
+- **Only TLS faces the network.** Keep `BROKER_BIND` unset so that the plain port stays private. The broker machine's own containers still use the plain port, inside Docker.
+- **The team CA is created once.** Running `./broker.sh tls` again, for example for a new address, only renews the broker's certificate (valid for 825 days), and the other machines keep working. The CA's private key never leaves the broker's volume. `./broker.sh ca` writes `team-ca.crt` again if it is lost, and `./broker.sh tls-off` turns TLS off and deletes the certificates and the CA.
+- **Clear errors.** `healer doctor` and `healer listen` say when the certificate cannot be verified, or when the port has no TLS, instead of retrying.
+- `team-ca.crt` holds no secret, and git ignores it.
 
 ## Sharing fixes with the team
 

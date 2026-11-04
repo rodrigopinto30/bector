@@ -9,7 +9,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(extra="ignore")
+    """An empty variable, such as ``MQTT_CA_CERT=`` in ``.env``, means the default."""
+
+    model_config = SettingsConfigDict(extra="ignore", env_ignore_empty=True)
 
     anthropic_api_key: SecretStr | None = None
     chroma_path: Path = Path(".healer/chroma")
