@@ -23,19 +23,20 @@ services:
     container_name: healer-mosquitto
     ports:
       - "${BROKER_BIND:-127.0.0.1}:${BROKER_PORT:-1883}:1883"
+      - "${BROKER_TLS_BIND:-127.0.0.1}:${BROKER_TLS_PORT:-8883}:8883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data
       - mosquitto-security:/mosquitto/security
-    # The password and ACL files must exist before Mosquitto starts, readable only by the
-    # mosquitto user (1883), which is the user it reads them as.
+    # The password and ACL files and the folder for the TLS listener must exist before
+    # Mosquitto starts, readable only by the mosquitto user (1883), which reads them.
     command:
       - /bin/sh
       - -c
       - >-
-        mkdir -p /mosquitto/security && cd /mosquitto/security &&
-        touch passwd acl && chown 1883:1883 . passwd acl &&
-        chmod 700 . && chmod 600 passwd acl &&
+        mkdir -p /mosquitto/security/conf.d && cd /mosquitto/security &&
+        touch passwd acl && chown 1883:1883 . passwd acl conf.d &&
+        chmod 700 . conf.d && chmod 600 passwd acl &&
         exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
     restart: unless-stopped
 

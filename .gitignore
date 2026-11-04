@@ -10,3 +10,4 @@ project.md
 .ruff_cache/
 .pytest_cache/
 TESTING.md
+team-ca.crt
