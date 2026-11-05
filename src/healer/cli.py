@@ -73,6 +73,10 @@ def doctor() -> None:
         failed = True
         typer.echo("[fail] ANTHROPIC_API_KEY is not set")
     settings = Settings()
+    if os.geteuid() == 0:
+        typer.echo("[info] user: root; ./start.sh makes the containers run as your own user")
+    else:
+        typer.echo(f"[ok]   user: uid {os.geteuid()}, not root")
     if not _sandbox_ready(settings):
         failed = True
     if not _broker_ready(settings):

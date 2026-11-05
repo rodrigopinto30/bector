@@ -3,9 +3,10 @@
 It runs in its own container, with no network, no ``.env``, no workspace or data volumes,
 a read-only root filesystem and only the capabilities it needs. The only thing it shares
 with the cli container is the volume with the copies, and the socket it listens on, which
-only root can use. Each command runs as an unprivileged user that owns nothing else; when
-it ends, every process it left behind is killed and ``/tmp`` is emptied, so one run cannot
-affect the next.
+only root and the cli container's group can use. Each command runs as an unprivileged user
+that owns nothing else; when it ends, every process it left behind is killed, ``/tmp`` is
+emptied and the copy goes back to the cli container's user, so one run cannot affect the
+next.
 
 Run it with ``python -m healer.adapters.sandbox_server``.
 """
@@ -53,11 +54,15 @@ class SandboxServer:
         copies_dir: Path,
         *,
         user: int | None = SANDBOX_USER,
+        client: tuple[int, int] | None = None,
         after_run: Callable[[], None] | None = None,
     ) -> None:
+        """``client`` is the uid and gid of the cli container, which owns each copy before
+        and after its run. Without it, only root can reach the socket."""
         self._socket_path = socket_path
         self._copies_dir = copies_dir
         self._user = user
+        self._client = client
         self._after_run = after_run
 
     def handle(self, data: bytes) -> SandboxResponse:
@@ -72,7 +77,6 @@ class SandboxServer:
             copy = self._copy(request.cwd)
             if not request.argv:
                 raise ExecutionError("the request has no command")
-            self._hand_over(copy)
             runner = SubprocessRunner(
                 timeout_seconds=request.timeout_seconds,
                 max_output_bytes=request.max_output_bytes,
@@ -81,7 +85,11 @@ class SandboxServer:
                 user=self._user,
                 after_exit=self._after_run,
             )
-            result = runner.run(request.argv, copy)
+            try:
+                self._hand_over(copy)
+                result = runner.run(request.argv, copy)
+            finally:
+                self._hand_back(copy)
         except ExecutionError as exc:
             return SandboxResponse(ok=False, error=str(exc))
         except OSError as exc:
@@ -96,13 +104,16 @@ class SandboxServer:
         return SandboxResponse(ok=True, result=result)
 
     def serve_forever(self) -> None:
+        # The cli container's group may create copies and use the socket. The sandbox user
+        # may only pass through the copies folder to reach the copy it was handed.
         self._copies_dir.mkdir(parents=True, exist_ok=True)
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(self._socket_path.parent, 0o700)
+        self._share(self._copies_dir, 0o771, 0o700)
+        self._share(self._socket_path.parent, 0o750, 0o700)
         self._socket_path.unlink(missing_ok=True)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             server.bind(str(self._socket_path))
-            os.chmod(self._socket_path, 0o600)
+            self._share(self._socket_path, 0o660, 0o600)
             server.listen(8)
             logger.info("test sandbox ready at %s", self._socket_path)
             try:
@@ -141,18 +152,35 @@ class SandboxServer:
             raise ExecutionError(f"{cwd} is not a copy prepared for the sandbox")
         return path
 
+    def _share(self, path: Path, shared: int, private: int) -> None:
+        if self._client is None:
+            os.chmod(path, private)
+            return
+        os.chown(path, 0, self._client[1])
+        os.chmod(path, shared)
+
     def _hand_over(self, copy: Path) -> None:
-        """Give the copy to the sandbox user. Until now only root could read it, so a run
-        cannot touch the copies that are waiting for theirs."""
+        """Give the copy to the sandbox user. Until now only its owner could read it, so a
+        run cannot touch the copies that are waiting for theirs."""
         if self._user is None:
             return
-        # Bottom up, and the mode before the owner: once a folder belongs to the sandbox
-        # user, this process has no right left to read or change it.
+        self._give(copy, self._user, self._user, 0o711)
+
+    def _hand_back(self, copy: Path) -> None:
+        """Return the copy to the cli container's user, so it can delete it."""
+        if self._user is None or self._client is None:
+            return
+        self._give(copy, *self._client, 0o700)
+
+    @staticmethod
+    def _give(copy: Path, uid: int, gid: int, mode: int) -> None:
+        # Bottom up, never following links, and the mode of the copy before its owner,
+        # while this process is still allowed to change it.
         for directory, dirnames, filenames in os.walk(copy, topdown=False, followlinks=False):
             for name in [*dirnames, *filenames]:
-                os.lchown(os.path.join(directory, name), self._user, self._user)
-        os.chmod(copy, 0o711)
-        os.lchown(copy, self._user, self._user)
+                os.lchown(os.path.join(directory, name), uid, gid)
+        os.chmod(copy, mode)
+        os.lchown(copy, uid, gid)
 
 
 def clean_up_after_run(user: int = SANDBOX_USER) -> None:
@@ -183,9 +211,11 @@ def _stop(*_: object) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     signal.signal(signal.SIGTERM, _stop)
+    uid, gid = os.environ.get("SANDBOX_CLIENT_UID"), os.environ.get("SANDBOX_CLIENT_GID")
     server = SandboxServer(
         Path(os.environ.get("SANDBOX_SOCKET", "/sandbox/run/runner.sock")),
         Path(os.environ.get("SANDBOX_DIR", "/sandbox/copies")),
+        client=(int(uid), int(gid)) if uid and gid else None,
         after_run=clean_up_after_run,
     )
     try:
