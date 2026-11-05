@@ -105,12 +105,14 @@ tls_names() {
 }
 
 # Runs a script in a throwaway container of the cli image, which has openssl, with the
-# broker's security volume and this folder (as /app) mounted.
+# broker's security volume and this folder (as /app) mounted. It runs as root, with only
+# the capabilities it needs to write and give away the broker's files.
 with_openssl() {
   export HOST_UID HOST_GID
-  HOST_UID="$(id -u)"
-  HOST_GID="$(id -g)"
-  $DOCKER compose run --rm --no-deps -T -v mosquitto-security:/mosquitto/security \
+  HOST_UID="${SUDO_UID:-$(id -u)}"
+  HOST_GID="${SUDO_GID:-$(id -g)}"
+  $DOCKER compose run --rm --no-deps -T --user 0:0 --cap-add CHOWN --cap-add FOWNER \
+    --cap-add DAC_OVERRIDE -v mosquitto-security:/mosquitto/security \
     -e SAN -e NAMES -e HOST_UID -e HOST_GID --entrypoint /bin/sh cli -c "$1"
 }
 

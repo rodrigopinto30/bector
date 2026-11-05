@@ -57,10 +57,41 @@ fi
 WORKSPACE_PATH="$(grep -E '^WORKSPACE_PATH=' .env | cut -d= -f2- || true)"
 mkdir -p "${WORKSPACE_PATH:-./workspace}"
 
+# The containers run as the developer, so what they write to the project is the developer's.
+if ! grep -qE '^HOST_UID=' .env; then
+  {
+    echo ""
+    echo "# The user the containers run as (your own), created by start.sh"
+    echo "HOST_UID=${SUDO_UID:-$(id -u)}"
+    echo "HOST_GID=${SUDO_GID:-$(id -g)}"
+  } >> .env
+  log "Created HOST_UID and HOST_GID in .env."
+fi
+HOST_UID="$(grep -E '^HOST_UID=' .env | tail -n 1 | cut -d= -f2-)"
+HOST_GID="$(grep -E '^HOST_GID=' .env | tail -n 1 | cut -d= -f2-)"
+export HOST_UID HOST_GID
+if [ "$HOST_UID" = "0" ]; then
+  log "Warning: HOST_UID is 0, so the containers will run as root."
+fi
+
 log "Preparing the broker credentials of this machine..."
 ./broker.sh local
 
-log "Building and starting services..."
-$DOCKER compose up -d --build
+log "Building the images..."
+$DOCKER compose build
+
+# Data volumes and tool caches that earlier versions, running as root, left behind.
+log "Giving this user the data volumes and caches..."
+$DOCKER compose run --rm --no-deps -T --user 0:0 --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+  -e HOST_UID -e HOST_GID --entrypoint /bin/sh cli -c '
+    for path in /data/chroma /data/healer /home/healer/.cache/chroma \
+      /app/.mypy_cache /app/.ruff_cache /app/.pytest_cache /app/.coverage \
+      /workspace/.pytest_cache /workspace/.ruff_cache; do
+      [ -e "$path" ] && find "$path" ! -user "$HOST_UID" -exec chown -h "$HOST_UID:$HOST_GID" {} +
+    done
+    true'
+
+log "Starting services..."
+$DOCKER compose up -d
 
 log "Ready. Try: $DOCKER compose exec cli healer doctor"

@@ -1,5 +1,13 @@
 x-healer: &healer
-  build: .
+  build: &build
+    context: .
+    args:
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
+  # The developer's own uid and gid, never root, and no privileges at all.
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
   env_file: .env
   environment:
     MQTT_HOST: ${MQTT_HOST:-mosquitto}
@@ -11,7 +19,7 @@ x-healer: &healer
   volumes:
     - .:/app
     - chroma-data:/data/chroma
-    - chroma-models:/root/.cache/chroma
+    - chroma-models:/home/healer/.cache/chroma
     - healer-data:/data/healer
     - ${WORKSPACE_PATH:-./workspace}:/workspace
     - sandbox-work:/sandbox
@@ -50,14 +58,19 @@ services:
 
   # Runs the tests of the copies, away from the secrets and files of the cli container:
   # no network, no .env, no workspace or data volumes, a read-only filesystem and only the
-  # capabilities it needs to hand a copy over and run its command as an unprivileged user.
+  # capabilities it needs to hand a copy over, run its command as an unprivileged user and
+  # give it back. Its server is the only process here that keeps root, because changing to
+  # another user needs it; the tests themselves run as user 10001.
   sandbox:
-    build: .
+    build: *build
     container_name: healer-sandbox
+    user: "0:0"
     command: ["python", "-m", "healer.adapters.sandbox_server"]
     environment:
       SANDBOX_SOCKET: /sandbox/run/runner.sock
       SANDBOX_DIR: /sandbox/copies
+      SANDBOX_CLIENT_UID: ${HOST_UID:-1000}
+      SANDBOX_CLIENT_GID: ${HOST_GID:-1000}
     volumes:
       - sandbox-work:/sandbox
     network_mode: none
@@ -65,7 +78,7 @@ services:
     tmpfs:
       - /tmp:size=512m
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    cap_add: [CHOWN, FOWNER, DAC_READ_SEARCH, SETUID, SETGID, KILL]
     security_opt: ["no-new-privileges:true"]
     init: true
     pids_limit: 512
