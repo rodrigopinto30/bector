@@ -61,6 +61,22 @@ def test_close_removes_read_only_files(workspace: Path, base: Path) -> None:
     assert not sandbox.root.exists()
 
 
+def test_removing_a_copy_never_changes_what_a_link_points_to(
+    workspace: Path, base: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep me")
+    os.chmod(outside, 0o444)
+    sandbox = TempDirSandboxProvider(workspace, base_dir=base).create()
+    locked = sandbox.root / "app"
+    (locked / "link").symlink_to(outside)
+    os.chmod(locked, 0o500)
+    sandbox.close()
+    assert not sandbox.root.exists()
+    assert outside.read_text() == "keep me"
+    assert outside.stat().st_mode & 0o777 == 0o444
+
+
 def test_symlinks_are_copied_as_links_not_followed(
     workspace: Path, base: Path, tmp_path: Path
 ) -> None:
