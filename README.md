@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. What is still missing concerns the containers' users and how the project is built and checked.
+All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. What is still missing concerns how the project is built and checked.
 
 | Phase | What it delivers | Status |
 | --- | --- | --- |
@@ -24,7 +24,6 @@ All five development phases are implemented. The broker requires a password per 
 
 **Still pending:**
 
-- **Non-root containers.** The `cli` container still runs as root. The tests no longer run there, but in the sandbox, which runs them as an unprivileged user.
 - **Reproducible builds.** Dependency versions are minimum bounds, and there is no lock file.
 - **CI.** There is no pipeline yet: ruff, mypy and pytest are run by hand, and there is no dependency audit.
 
@@ -77,8 +76,9 @@ The script will:
 
 1. Check that Docker and the Compose plugin are available, and install them if they are missing (Linux only, may ask for `sudo`).
 2. Create `.env` from `.env.example` if it does not exist.
-3. Give this machine a user and password for its MQTT broker, written at the end of `.env` the first time.
-4. Build the image and start the services.
+3. Write your uid and gid at the end of `.env` the first time (`HOST_UID`, `HOST_GID`): the containers run as your own user.
+4. Give this machine a user and password for its MQTT broker, written at the end of `.env` the first time.
+5. Build the images, give your user the data volumes and the tool caches that older versions left owned by root, and start the services.
 
 Then check the setup:
 
@@ -99,7 +99,7 @@ To stop everything:
 
 | Service | Container | Purpose |
 | --- | --- | --- |
-| `cli` | `healer-cli` | Where the `healer` command runs. |
+| `cli` | `healer-cli` | Where the `healer` command runs, as your own user and with no privileges. |
 | `sandbox` | `healer-sandbox` | Runs the tests of each copy, with no network, no secrets and no access to your files. |
 | `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. Only the nodes added with `./broker.sh` can connect. |
 | `listener` | `healer-listener` | Optional. Runs `healer listen` in the background; it only starts with the `team` profile. |
@@ -394,7 +394,7 @@ docker compose exec cli healer apply fix.json --yes       # apply without asking
 - **No by default.** Pressing Enter, or running without a terminal (closed input, CI), means no. `--apply` on `healer run` and `--yes` on `healer apply` skip the question; `--no-apply` never asks and never writes.
 - **Nothing changed since the test.** The patch is written only if every file it touches still has exactly the content that was tested (compared by SHA-256). If you edited one of them in the meantime, nothing is written; run it again.
 - **All or nothing.** The patch follows the same rules as on the copy (paths inside the project, size limits, no symlinks). If writing one file fails, the files already written are restored.
-- **Your files stay yours.** Existing files are rewritten in place, so they keep their owner and permissions. New files and folders get the owner of the folder they are created in, so the container, which runs as root, leaves no root-owned files in your project.
+- **Your files stay yours.** The container runs as your own user, so new files and folders are yours, and existing files are rewritten in place, keeping their owner and permissions. Run as root, as outside Docker, new files get the owner of the folder they are created in.
 - Only the files of the patch are checked. If you changed other files after the test, the tests may behave differently; `healer apply` tests the patch again against the current code.
 - **Exit codes** of `healer apply`: `0` when the tests pass with the patch (applied or not), `1` when they still fail (nothing is written), `2` on invalid patches, patches that no longer fit the code, or write errors.
 
@@ -576,7 +576,7 @@ The counts never include the values. Redacting already redacted text changes not
 
 ## Development
 
-The development tools run inside the container (the host does not need Python packages). The container starts in `/workspace`, so point it at the project in `/app` with `-w /app`:
+The development tools run inside the container (the host does not need Python packages), as your own user, so their caches in the project are yours. The container starts in `/workspace`, so point it at the project in `/app` with `-w /app`:
 
 ```bash
 docker compose exec -w /app cli ruff format src tests

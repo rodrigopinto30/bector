@@ -62,7 +62,13 @@ attempt("write to the system", lambda: open("/usr/local/lib/planted", "w").write
 attempt("open the socket folder", lambda: os.listdir(os.path.dirname(sys.argv[1])))
 attempt("open another copy", lambda: os.listdir(sys.argv[2]))
 attempt("read the workspace", lambda: os.listdir("/workspace"))
-attempt("read the data volumes", lambda: os.listdir("/data"))
+def data_files():
+    found = [os.path.join(top, name) for top, _, names in os.walk("/data") for name in names]
+    if not found:
+        raise FileNotFoundError("no data")
+
+
+attempt("read the data volumes", data_files)
 results["environment"] = sorted(os.environ)
 open("/tmp/planted-marker", "w").write("x")
 os.makedirs("/tmp/.local/lib", exist_ok=True)

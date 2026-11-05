@@ -90,7 +90,7 @@ class MqttSubscriber:
 
         def received(_c: mqtt.Client, _u: Any, message: mqtt.MQTTMessage) -> None:
             try:
-                on_message(message.payload)
+                on_message(bytes(message.payload))
             except Exception:
                 logger.exception("A received message could not be handled")
 

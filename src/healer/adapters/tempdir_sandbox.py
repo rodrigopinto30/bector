@@ -1,5 +1,6 @@
 """``SandboxProvider`` that copies the workspace into a private temporary directory."""
 
+import contextlib
 import logging
 import os
 import shutil
@@ -105,9 +106,18 @@ class TempDirSandboxProvider:
         return files
 
 
-def _force_remove(function: object, path: str, _: object) -> None:
-    os.chmod(path, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+def _force_remove(_function: object, path: str, _error: object) -> None:
+    """Retry a removal after giving this user full access to the folder that holds it.
+
+    Removing an entry needs write access to its folder, not to the entry, and only root
+    gets around that. Links are never followed, so nothing outside the copy changes mode.
+    """
+    for folder in (os.path.dirname(path), path):
+        if os.path.isdir(folder) and not os.path.islink(folder):
+            with contextlib.suppress(OSError):
+                os.chmod(folder, stat.S_IRWXU)
     if os.path.isdir(path) and not os.path.islink(path):
         shutil.rmtree(path, ignore_errors=True)
     else:
-        os.unlink(path)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
