@@ -1,4 +1,5 @@
-FROM python:3.11-slim
+# The base image is pinned to a Python version and a Debian release.
+FROM python:3.11.18-slim-trixie
 
 # The containers run as this user, with the uid and gid of the developer on the host, so
 # what they write to the mounted project belongs to the developer. start.sh sets them.
@@ -22,9 +23,17 @@ RUN groupadd --non-unique --gid "$HOST_GID" healer \
 
 WORKDIR /app
 
+# Every package comes from the lock and is checked against its hashes; nothing is resolved
+# or fetched unpinned. wheel, which the base image brings and nothing uses, is removed, so
+# what is installed is exactly what is locked and audited. The project itself is then
+# installed without its dependencies.
+COPY requirements.lock ./
+RUN pip install --require-hashes --no-deps -r requirements.lock \
+    && pip uninstall --yes wheel
+
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install -e ".[dev]"
+RUN pip install --no-deps --no-build-isolation -e .
 
 COPY . .
 

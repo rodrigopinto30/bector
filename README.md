@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. What is still missing concerns how the project is built and checked.
+All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. What is still missing is a pipeline that checks every change.
 
 | Phase | What it delivers | Status |
 | --- | --- | --- |
@@ -24,8 +24,7 @@ All five development phases are implemented. The broker requires a password per 
 
 **Still pending:**
 
-- **Reproducible builds.** Dependency versions are minimum bounds, and there is no lock file.
-- **CI.** There is no pipeline yet: ruff, mypy and pytest are run by hand, and there is no dependency audit.
+- **CI.** There is no pipeline yet: ruff, mypy, pytest and the dependency audit are run by hand.
 
 **Known limitations:**
 
@@ -587,6 +586,25 @@ docker compose exec -w /app cli pytest -m "not integration"      # fast unit tes
 ```
 
 Tests use a fake embedding function and a fake model, so they never download anything or call the real API. Architectural decisions are recorded in `docs/adr/`.
+
+### Dependencies
+
+`pyproject.toml` says which packages the project needs and which versions it accepts. `requirements.lock` pins every package the images install, 145 in all, each with the hashes of its files, and is generated from `pyproject.toml` with `uv`. The images install only from the lock: `pip` checks every file against its hashes and refuses the build if one does not match, so a changed or replaced package cannot get in. The base image is pinned too, to `python:3.11.18-slim-trixie`.
+
+```bash
+./deps.sh lock      # after editing pyproject.toml: pin what it needs, keeping the other versions
+./deps.sh upgrade   # move every package to the newest version pyproject.toml allows
+./deps.sh audit     # check the locked versions against the known vulnerabilities
+```
+
+```text
+No known vulnerabilities found, 5 ignored
+```
+
+- **After `lock` or `upgrade`,** review `git diff requirements.lock`, rebuild with `./stop.sh && ./start.sh` and run the tests. A version that changes on its own no longer happens: the images change only when the lock does.
+- **The audit uses `pip-audit`** and fails on any known vulnerability, except those listed in `audit-exceptions.txt`, each with the reason it does not apply. Today these are the four vulnerabilities of chromadb 1.5.9, which has no fixed version yet: all of them are in Chroma's HTTP server, and this project uses Chroma only embedded, with no server. Remove an entry as soon as a fixed version is locked.
+- The lock is universal: it also has the packages and hashes for other platforms, such as Apple Silicon, so the images build the same way there.
+- The system packages of the image (`git`, `build-essential`) still come from Debian's repositories without pinned versions.
 
 ## The Chroma database
 
