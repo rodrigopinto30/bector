@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. What is still missing is a pipeline that checks every change.
+All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. Every pull request is checked by a CI pipeline, and every commit by a local pre-commit check.
 
 | Phase | What it delivers | Status |
 | --- | --- | --- |
@@ -21,10 +21,6 @@ All five development phases are implemented. The broker requires a password per 
 | 3. Diagnoser | Turn a failure into a structured diagnosis with a portable signature | Done |
 | 4. Self-correction loop | Isolated test runs, patches, secret redaction, proposals from Claude, retries, local cache and token ledger | Done |
 | 5. Recommendation and team sync | Applying fixes with your approval, then sharing, receiving and reusing them across machines | Done |
-
-**Still pending:**
-
-- **CI.** There is no pipeline yet: ruff, mypy, pytest and the dependency audit are run by hand.
 
 **Known limitations:**
 
@@ -78,6 +74,7 @@ The script will:
 3. Write your uid and gid at the end of `.env` the first time (`HOST_UID`, `HOST_GID`): the containers run as your own user.
 4. Give this machine a user and password for its MQTT broker, written at the end of `.env` the first time.
 5. Build the images, give your user the data volumes and the tool caches that older versions left owned by root, and start the services.
+6. Turn on the checks that run before every commit (ruff, mypy and the fast tests), unless the clone already has hooks of its own.
 
 Then check the setup:
 
@@ -586,6 +583,47 @@ docker compose exec -w /app cli pytest -m "not integration"      # fast unit tes
 ```
 
 Tests use a fake embedding function and a fake model, so they never download anything or call the real API. Architectural decisions are recorded in `docs/adr/`.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`. It builds the images and starts the services with `./start.sh`, and then runs these checks inside the cli container, against the real broker and sandbox:
+
+1. `requirements.lock` matches `pyproject.toml`.
+2. `ruff check` and `ruff format --check`.
+3. `mypy`.
+4. The whole test suite with coverage: at least 75% overall, and 85% for `domain` and `services`.
+5. `./deps.sh audit`.
+
+If a step fails, the job also prints the logs of the services. It needs no secrets, because the tests never call the real API. The result appears in each pull request as the check **Build, lint, types, tests and audit**.
+
+The workflow does not stop a merge by itself. To merge only when the check is green, the owner of the repository adds a rule on GitHub, once:
+
+1. **Settings → Rules → Rulesets → New ruleset → New branch ruleset.**
+2. Give it a name, set **Enforcement status** to **Active**, and under **Target branches** choose **Add target → Include default branch**.
+3. Tick **Require status checks to pass**, then **Add checks** and pick **Build, lint, types, tests and audit**. It is listed only after the workflow has run at least once.
+4. Tick **Require a pull request before merging**. With a single developer, leave **Required approvals** at 0: GitHub does not let the author of a pull request approve it.
+5. **Create.**
+
+### Pre-commit checks
+
+`./start.sh` turns on `.githooks/pre-commit`, a check that runs before every commit. It uses the tools of the cli container, so the host needs nothing else, but the container must be running. If the commit has Python files, it runs:
+
+- `ruff check` and `ruff format --check` on those files;
+- `mypy` on the whole project, since types cross files;
+- the fast tests (`-m "not integration"`), because a change can break a test in another file, and the test files of the commit.
+
+```text
+[pre-commit] ruff on 1 file(s)...
+[pre-commit] mypy...
+[pre-commit] fast tests...
+432 passed, 1 skipped, 79 deselected in 7.96s
+[pre-commit] All checks passed.
+```
+
+It takes about 12 seconds. A commit with no Python files, such as one with only documentation, is not checked. If a check fails, the commit is not made and its output says why.
+
+- **To skip it once:** `git commit --no-verify`.
+- **To turn it off:** `git config core.hooksPath .git/hooks`. `./start.sh` only turns it on when `core.hooksPath` is not set, so it stays off.
 
 ### Dependencies
 

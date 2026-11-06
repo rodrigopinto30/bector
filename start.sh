@@ -94,4 +94,10 @@ $DOCKER compose run --rm --no-deps -T --user 0:0 --cap-add CHOWN --cap-add DAC_R
 log "Starting services..."
 $DOCKER compose up -d
 
+# The pre-commit checks in .githooks, unless this clone already uses hooks of its own.
+if command -v git >/dev/null 2>&1 && [ -d .git ] && [ -z "$(git config --get core.hooksPath || true)" ]; then
+  git config core.hooksPath .githooks
+  log "Enabled the pre-commit checks (.githooks/pre-commit)."
+fi
+
 log "Ready. Try: $DOCKER compose exec cli healer doctor"

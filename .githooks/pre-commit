@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Checks the Python files of a commit before it is made, inside the cli container: ruff
+# (lint and format) on those files, mypy, the fast tests, and the test files that changed.
+# A commit without Python files is not checked. To skip the checks once, run
+# git commit --no-verify.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+mapfile -t files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+if [ "${#files[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+say() { echo "[pre-commit] $*"; }
+
+DOCKER="docker"
+if ! docker info >/dev/null 2>&1; then
+  DOCKER="sudo docker"
+fi
+
+if [ -z "$($DOCKER compose ps -q --status running cli 2>/dev/null)" ]; then
+  say "The cli container is not running, so the checks cannot run." >&2
+  say "Start it with ./start.sh, or skip the checks once with git commit --no-verify." >&2
+  exit 1
+fi
+
+run() {
+  $DOCKER compose exec -T -w /app cli "$@"
+}
+
+# Only the summary line when the tests pass; everything when they fail.
+run_tests() {
+  local output
+  if output=$(run pytest -q --no-header -p no:cacheprovider "$@" 2>&1); then
+    printf '%s\n' "$output" | tail -n 1
+  else
+    printf '%s\n' "$output"
+    return 1
+  fi
+}
+
+say "ruff on ${#files[@]} file(s)..."
+run ruff check --quiet "${files[@]}"
+run ruff format --check --quiet "${files[@]}"
+say "mypy..."
+run mypy --no-error-summary
+say "fast tests..."
+run_tests -m "not integration"
+mapfile -t tests < <(printf '%s\n' "${files[@]}" | grep -E '^tests/(.*/)?test_[^/]*\.py$' || true)
+if [ "${#tests[@]}" -gt 0 ]; then
+  say "the ${#tests[@]} test file(s) of this commit..."
+  run_tests "${tests[@]}"
+fi
+say "All checks passed."
