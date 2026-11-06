@@ -1,0 +1,60 @@
+# Every pull request and every push to main build the images and run, inside them, the
+# same checks as on a developer's machine (section 7.7 of the plan): the lock is current,
+# ruff, mypy, the whole test suite with coverage, against the real broker and sandbox,
+# the coverage of the domain and the services, and the dependency audit.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Build, lint, types, tests and audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # Pinned to the commit of v7.0.1, like the Python dependencies.
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Build the images and start the services
+        run: ./start.sh
+
+      - name: The lock matches pyproject.toml
+        run: ./deps.sh lock && git diff --exit-code requirements.lock
+
+      - name: Lint
+        run: docker compose exec -T -w /app cli ruff check src tests
+
+      - name: Format
+        run: docker compose exec -T -w /app cli ruff format --check src tests
+
+      - name: Types
+        run: docker compose exec -T -w /app cli mypy
+
+      - name: Tests with coverage
+        run: docker compose exec -T -w /app cli pytest -q --cov --cov-report=term-missing:skip-covered
+
+      # The whole project needs 75% (pyproject.toml); the domain and the services, 85% (7.4).
+      - name: Coverage of the domain and the services
+        run: >-
+          docker compose exec -T -w /app cli coverage report --skip-covered --fail-under=85
+          --include='src/healer/domain/*,src/healer/services/*'
+
+      - name: Dependency audit
+        run: ./deps.sh audit
+
+      - name: Logs of the services
+        if: failure()
+        run: docker compose logs --no-color --tail 200
