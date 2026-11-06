@@ -11,7 +11,7 @@ from healer.domain.ledger import LedgerEntry
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
 from healer.domain.proposal import Proposal
-from healer.domain.sharing import ReceivedSolution, TeamMatch
+from healer.domain.sharing import PendingShare, ReceivedSolution, TeamMatch
 from healer.domain.solution import Solution
 
 
@@ -142,8 +142,33 @@ class Ledger(Protocol):
 class SolutionPublisher(Protocol):
     """Sends a sealed solution to the other nodes."""
 
+    @property
+    def topic(self) -> str: ...
+
     def publish(self, message: bytes) -> None:
         """Raise ``SharingError`` when the broker did not accept the message."""
+        ...
+
+
+class ShareOutbox(Protocol):
+    """Solutions the broker did not take, one per topic and error signature."""
+
+    def keep(self, pending: PendingShare) -> None:
+        """Store ``pending``, replacing an entry for the same topic and signature unless
+        that one was published later. Raise ``OutboxError`` if it cannot be stored."""
+        ...
+
+    def pending(self) -> list[PendingShare]:
+        """Return every entry, the earliest published first."""
+        ...
+
+    def remove(self, topic: str, signature: str, *, up_to: datetime) -> None:
+        """Forget the entry for ``topic`` and ``signature`` if it was published no later
+        than ``up_to``, so a newer one stored meanwhile is kept."""
+        ...
+
+    def clear(self) -> int:
+        """Forget every entry and return how many there were."""
         ...
 
 
@@ -153,7 +178,9 @@ class SolutionSubscriber(Protocol):
     def run(self, on_message: Callable[[bytes], None], on_status: Callable[[str], None]) -> None:
         """Deliver messages until ``stop`` is called.
 
-        Raise ``SharingError`` when the broker refuses this node.
+        ``on_status`` gets a line each time the connection changes; it starts with
+        ``connected`` once this node is connected. Raise ``SharingError`` when the broker
+        refuses this node.
         """
         ...
 

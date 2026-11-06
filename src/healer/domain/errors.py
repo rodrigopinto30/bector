@@ -69,3 +69,7 @@ class RejectedMessageError(HealerError):
 class SharingError(HealerError):
     """A solution could not be shared: sharing is misconfigured, the patch holds a secret,
     the message is too large, or the broker could not be reached."""
+
+
+class OutboxError(HealerError):
+    """The fixes waiting to be sent could not be read or written."""

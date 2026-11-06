@@ -19,6 +19,7 @@ from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sandbox_client import SandboxServiceRunner
 from healer.adapters.sqlite_ledger import SqliteLedger
+from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.adapters.subprocess_runner import SubprocessRunner
 from healer.adapters.tempdir_sandbox import TempDirSandboxProvider
 from healer.adapters.workspace_paths import WorkspacePathResolver
@@ -210,6 +211,10 @@ def build_publisher(settings: Settings) -> MqttPublisher:
     )
 
 
+def build_outbox(settings: Settings) -> SqliteOutbox:
+    return SqliteOutbox(settings.outbox_path)
+
+
 def build_solution_sharer(
     settings: Settings, publisher: SolutionPublisher | None = None
 ) -> SolutionSharer:
@@ -219,6 +224,7 @@ def build_solution_sharer(
         node=settings.node_id,
         key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
+        outbox=build_outbox(settings),
     )
 
 
