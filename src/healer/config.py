@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     chroma_path: Path = Path(".healer/chroma")
     ledger_path: Path = Path(".healer/ledger.sqlite3")
+    outbox_path: Path = Path(".healer/outbox.sqlite3")
+    outbox_retry_seconds: float = Field(default=300.0, gt=0)
     mqtt_host: str = "localhost"
     mqtt_port: int = 1883
     mqtt_topic: str = "healer/solutions/v1"

@@ -3,11 +3,19 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from healer.domain.errors import SharingError
+from healer.domain.errors import OutboxError, SharingError
 from healer.domain.patch import Patch
-from healer.domain.ports import SolutionPublisher
+from healer.domain.ports import ShareOutbox, SolutionPublisher
 from healer.domain.redaction import Redactor
-from healer.domain.sharing import Evidence, SharedSolution, ShareReceipt, check_key, seal
+from healer.domain.sharing import (
+    Evidence,
+    PendingShare,
+    ResendReport,
+    SharedSolution,
+    ShareReceipt,
+    check_key,
+    seal,
+)
 from healer.domain.solution import Solution
 
 
@@ -19,6 +27,9 @@ class SolutionSharer:
     that looks like a secret is not shared at all, because masking it would break the
     patch. Every message is signed with the team key (HMAC-SHA256), so receivers can
     reject forged or altered ones.
+
+    With an outbox, a solution the broker does not take is kept there, and ``resend``
+    sends it later (7.6). Only the topic it was meant for ever receives it.
     """
 
     def __init__(
@@ -29,6 +40,7 @@ class SolutionSharer:
         node: str,
         key: bytes,
         max_bytes: int,
+        outbox: ShareOutbox | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         check_key(key)
@@ -37,10 +49,15 @@ class SolutionSharer:
         self._node = node
         self._key = key
         self._max_bytes = max_bytes
+        self._outbox = outbox
         self._clock = clock
 
     def share(self, solution: Solution) -> ShareReceipt:
-        """Publish ``solution``; raise ``SharingError`` if it must not or could not be sent."""
+        """Publish ``solution``; raise ``SharingError`` if it must not or could not be sent.
+
+        If the broker does not take it and there is an outbox, it is kept there instead and
+        the receipt says why.
+        """
         for edit in solution.patch.edits:
             kinds = (
                 self._redactor.redact(edit.old).counts.keys()
@@ -74,10 +91,69 @@ class SolutionSharer:
                 verified_at=solution.verified_at,
             ),
         )
+        message = self._seal(shared)
+        topic = self._publisher.topic
+        try:
+            self._publisher.publish(message)
+        except SharingError as exc:
+            if self._outbox is None:
+                raise
+            failure = str(exc)
+            try:
+                self._outbox.keep(
+                    PendingShare(
+                        solution=shared,
+                        topic=topic,
+                        queued_at=self._clock(),
+                        attempts=1,
+                        last_error=failure,
+                    )
+                )
+            except OutboxError as kept:
+                raise SharingError(
+                    f"{failure}; it could not be kept to send later: {kept}"
+                ) from exc
+            return ShareReceipt(solution=shared, size=len(message), hidden=hidden, failure=failure)
+        if self._outbox is not None:
+            # An older fix for the same error that is still waiting would only be ignored.
+            self._outbox.remove(topic, shared.signature, up_to=shared.published_at)
+        return ShareReceipt(solution=shared, size=len(message), hidden=hidden)
+
+    def resend(self) -> ResendReport:
+        """Send what waits in the outbox for this topic, earliest first.
+
+        The first failure ends the pass, since the rest would fail the same way; the entry
+        keeps the error and stays. An entry over the size limit can never be sent, so it is
+        dropped.
+        """
+        if self._outbox is None:
+            return ResendReport()
+        topic = self._publisher.topic
+        waiting = [entry for entry in self._outbox.pending() if entry.topic == topic]
+        sent = dropped = 0
+        for entry in waiting:
+            solution = entry.solution
+            try:
+                message = self._seal(solution)
+            except SharingError:
+                self._outbox.remove(topic, solution.signature, up_to=solution.published_at)
+                dropped += 1
+                continue
+            try:
+                self._publisher.publish(message)
+            except SharingError as exc:
+                retried = {"attempts": entry.attempts + 1, "last_error": str(exc)}
+                self._outbox.keep(entry.model_copy(update=retried))
+                left = len(waiting) - sent - dropped
+                return ResendReport(sent=sent, dropped=dropped, left=left, error=str(exc))
+            self._outbox.remove(topic, solution.signature, up_to=solution.published_at)
+            sent += 1
+        return ResendReport(sent=sent, dropped=dropped)
+
+    def _seal(self, shared: SharedSolution) -> bytes:
         message = seal(shared, self._key)
         if len(message) > self._max_bytes:
             raise SharingError(
                 f"the message is {len(message)} bytes; the limit is {self._max_bytes}"
             )
-        self._publisher.publish(message)
-        return ShareReceipt(solution=shared, size=len(message), hidden=hidden)
+        return message

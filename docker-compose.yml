@@ -16,6 +16,7 @@ x-healer: &healer
     SANDBOX_DIR: /sandbox/copies
     CHROMA_PATH: /data/chroma
     LEDGER_PATH: /data/healer/ledger.sqlite3
+    OUTBOX_PATH: /data/healer/outbox.sqlite3
   volumes:
     - .:/app
     - chroma-data:/data/chroma

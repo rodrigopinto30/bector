@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import signal
+import threading
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
@@ -27,7 +28,14 @@ from healer.domain.repair import (
     RepairResult,
     RepairStatus,
 )
-from healer.domain.sharing import MIN_KEY_LENGTH, Ingested, IngestOutcome, TeamMatch
+from healer.domain.sharing import (
+    MIN_KEY_LENGTH,
+    Ingested,
+    IngestOutcome,
+    PendingShare,
+    ResendReport,
+    TeamMatch,
+)
 from healer.domain.solution import Solution
 from healer.factory import (
     build_code_index,
@@ -35,6 +43,7 @@ from healer.factory import (
     build_fix_installer,
     build_fix_proposer,
     build_ledger,
+    build_outbox,
     build_publisher,
     build_repair_pipeline,
     build_sandbox_client,
@@ -44,6 +53,7 @@ from healer.factory import (
     build_subscriber,
     build_team_solutions,
 )
+from healer.services.solution_sharer import SolutionSharer
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
 
@@ -92,6 +102,17 @@ def doctor() -> None:
         )
     else:
         typer.echo(f"[ok]   sharing: on, as node {settings.node_id} on {settings.mqtt_topic}")
+    try:
+        waiting = len(build_outbox(settings).pending())
+    except HealerError as exc:
+        failed = True
+        typer.echo(f"[fail] outbox: {exc}")
+    else:
+        if waiting:
+            typer.echo(
+                f"[info] outbox: {_plural(waiting, 'fix', 'fixes')} waiting to be sent; "
+                "'healer outbox' lists them"
+            )
     raise typer.Exit(code=1 if failed else 0)
 
 
@@ -699,7 +720,11 @@ def _offer_fix(
 
 
 def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
-    """Send an applied fix to the team. A failure is reported but never undoes the fix."""
+    """Send an applied fix to the team. A failure is reported but never undoes the fix.
+
+    A fix the broker does not take waits in the outbox. Once one is delivered, the broker
+    is back, so the ones waiting are sent as well.
+    """
     if not enabled:
         return
     try:
@@ -712,11 +737,37 @@ def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
     except HealerError as exc:
         typer.echo(f"warning: the fix was applied but not shared: {exc}", err=True)
         return
+    if not receipt.delivered:
+        typer.echo(f"warning: the fix was applied but not sent yet: {receipt.failure}", err=True)
+        typer.echo(
+            "waiting    kept in the outbox: 'healer listen' sends it when the broker is back, "
+            "or send it with 'healer outbox --send'"
+        )
+        return
     hidden = f", {_plural(receipt.hidden, 'secret')} hidden" if receipt.hidden else ""
     typer.echo(
         f"shared     sent to the team as node {receipt.solution.node} on "
         f"{settings.mqtt_topic} ({receipt.size} bytes{hidden})"
     )
+    try:
+        _echo_resend(sharer.resend())
+    except HealerError as exc:
+        typer.echo(f"warning: the fixes waiting in the outbox were not sent: {exc}", err=True)
+
+
+def _echo_resend(report: ResendReport) -> None:
+    if report.sent:
+        typer.echo(f"resent     {_plural(report.sent, 'fix', 'fixes')} waiting in the outbox")
+    if report.dropped:
+        typer.echo(
+            f"dropped    {_plural(report.dropped, 'fix', 'fixes')} over MAX_SHARE_BYTES, "
+            "which could never be sent"
+        )
+    if report.error is not None:
+        typer.echo(
+            f"waiting    {_plural(report.left, 'fix', 'fixes')} still in the outbox: "
+            f"{_printable(report.error)}"
+        )
 
 
 def _confirm(question: str) -> bool:
@@ -794,8 +845,8 @@ def _print_applied(patch: Patch, applied: AppliedPatch | None, *, show_purpose: 
     typer.echo("")
 
 
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+def _plural(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {plural or noun + 's'}"
 
 
 def _report_run(
@@ -951,11 +1002,17 @@ def listen() -> None:
     Each message must carry a valid team signature, follow the expected format and hold a
     safe patch; anything else is refused. Nothing is ever applied or run. A node with a
     fixed NODE_ID also receives what was sent while it was off.
+
+    With SHARE_SOLUTIONS on, it also sends this node's fixes waiting in the outbox: right
+    after each connection, and every OUTBOX_RETRY_SECONDS while connected.
     """
     settings = Settings()
+    resender: _Resender | None = None
     try:
         ingester = build_solution_ingester(settings)
         subscriber = build_subscriber(settings)
+        if settings.share_solutions:
+            resender = _Resender(build_solution_sharer(settings), settings.outbox_retry_seconds)
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
@@ -974,20 +1031,73 @@ def listen() -> None:
         except HealerError as exc:
             typer.echo(f"warning: a valid message could not be stored: {exc}", err=True)
 
+    def on_status(status: str) -> None:
+        typer.echo(f"broker     {status}")
+        if resender is not None:
+            resender.status(status)
+
     previous = signal.signal(signal.SIGTERM, _interrupt)
+    if resender is not None:
+        resender.start()
     try:
-        subscriber.run(on_message, lambda status: typer.echo(f"broker     {status}"))
+        subscriber.run(on_message, on_status)
     except KeyboardInterrupt:
         typer.echo("stopped")
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     finally:
+        if resender is not None:
+            resender.stop()
         signal.signal(signal.SIGTERM, previous)
 
 
 def _interrupt(*_: object) -> None:
     raise KeyboardInterrupt
+
+
+class _Resender:
+    """Sends the outbox from a thread of its own, so receiving never waits for it: once
+    after each connection, and every ``interval`` seconds while connected."""
+
+    def __init__(self, sharer: SolutionSharer, interval: float) -> None:
+        self._sharer = sharer
+        self._interval = interval
+        self._wake = threading.Event()
+        self._connected = threading.Event()
+        self._stopping = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="healer-resender", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def status(self, status: str) -> None:
+        if status.startswith("connected"):
+            self._connected.set()
+            self._wake.set()
+        else:
+            self._connected.clear()
+
+    def stop(self) -> None:
+        """Start no new pass, and give the one under way a moment to finish."""
+        self._stopping.set()
+        self._wake.set()
+        self._thread.join(timeout=5)
+
+    def _loop(self) -> None:
+        while True:
+            self._wake.wait(self._interval)
+            self._wake.clear()
+            if self._stopping.is_set():
+                return
+            if not self._connected.is_set():
+                continue
+            try:
+                _echo_resend(self._sharer.resend())
+            except HealerError as exc:
+                typer.echo(
+                    f"warning: the fixes waiting in the outbox were not sent: {exc}", err=True
+                )
 
 
 def _ingested_line(ingested: Ingested) -> str:
@@ -1010,6 +1120,81 @@ def _ingested_line(ingested: Ingested) -> str:
 def _printable(text: str) -> str:
     """Text without control characters, which could fool the terminal. Tabs are kept."""
     return "".join(c if c.isprintable() or c == "\t" else "?" for c in text)
+
+
+@app.command()
+def outbox(
+    send: Annotated[
+        bool, typer.Option("--send", help="Send them now, if the broker takes them")
+    ] = False,
+    discard: Annotated[
+        bool, typer.Option("--discard", help="Forget them: the team will not receive them")
+    ] = False,
+) -> None:
+    """Show this node's accepted fixes that the broker did not take, which wait to be sent.
+
+    'healer listen' sends them right after connecting and every OUTBOX_RETRY_SECONDS, and
+    'healer run' once its next fix is delivered. Each one only goes to the topic it was
+    meant for.
+    """
+    if send and discard:
+        typer.echo("error: choose --send or --discard, not both", err=True)
+        raise typer.Exit(code=2)
+    settings = Settings()
+    try:
+        store = build_outbox(settings)
+        waiting = store.pending()
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not waiting:
+        typer.echo("no fixes waiting; every shared fix reached the broker")
+        return
+    count = _plural(len(waiting), "fix", "fixes")
+    if discard:
+        if not _confirm(f"discard {count}? The team will not receive them"):
+            typer.echo("kept       nothing was discarded")
+            return
+        typer.echo(f"discarded  {_plural(store.clear(), 'fix', 'fixes')}")
+        return
+    if send:
+        _send_outbox(settings, waiting)
+        return
+    typer.echo(f"{count} waiting to be sent, oldest first")
+    for entry in waiting:
+        solution = entry.solution
+        topic = "" if entry.topic == settings.mqtt_topic else " (not the current MQTT_TOPIC)"
+        typer.echo("")
+        typer.echo(
+            f"{solution.published_at:%Y-%m-%d %H:%M} UTC  for {_printable(entry.topic)}{topic}"
+        )
+        typer.echo(f"error      {_printable(solution.error)}")
+        typer.echo(f"files      {_printable(', '.join(solution.patch.files))}")
+        typer.echo(
+            f"tried      {_plural(entry.attempts, 'time')}, last: {_printable(entry.last_error)}"
+        )
+
+
+def _send_outbox(settings: Settings, waiting: list[PendingShare]) -> None:
+    try:
+        sharer = build_solution_sharer(settings)
+        typer.echo(
+            f"sending    the fixes waiting for {settings.mqtt_topic} through "
+            f"{settings.mqtt_host}:{settings.mqtt_port}..."
+        )
+        report = sharer.resend()
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    _echo_resend(report)
+    elsewhere = sum(entry.topic != settings.mqtt_topic for entry in waiting)
+    if elsewhere:
+        typer.echo(
+            f"kept       {_plural(elsewhere, 'fix', 'fixes')} for another topic, "
+            "sent only when MQTT_TOPIC is that one again"
+        )
+    if report.error is not None:
+        raise typer.Exit(code=1)
 
 
 @app.command()

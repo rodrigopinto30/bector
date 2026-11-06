@@ -49,6 +49,14 @@ def isolated_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_outbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own outbox, so none can send or drop the real waiting fixes."""
+    path = tmp_path / "outbox.sqlite3"
+    monkeypatch.setenv("OUTBOX_PATH", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def no_sharing(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test sends solutions to the real broker: sharing is off and the broker unreachable.
 

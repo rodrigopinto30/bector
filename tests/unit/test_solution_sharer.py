@@ -1,27 +1,33 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.domain.errors import SharingError
 from healer.domain.patch import FileEdit, Patch
 from healer.domain.redaction import Redactor
+from healer.domain.sharing import unseal
 from healer.domain.solution import Solution
 from healer.services.solution_sharer import SolutionSharer
 
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
 KEY = b"0123456789abcdef-team-key"
 AWS = "AKIA" + "IOSFODNN7EXAMPLE"
+TOPIC = "healer/solutions/v1"
+DOWN = "the broker at mosquitto:1883 could not be reached"
 
 
 class FakePublisher:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, topic: str = TOPIC) -> None:
         self.messages: list[bytes] = []
         self.fail = fail
+        self.topic = topic
 
     def publish(self, message: bytes) -> None:
         if self.fail:
-            raise SharingError("the broker at mosquitto:1883 could not be reached")
+            raise SharingError(DOWN)
         self.messages.append(message)
 
 
@@ -41,11 +47,27 @@ def solution(**changes: object) -> Solution:
 
 
 def sharer(
-    publisher: FakePublisher, *, key: bytes = KEY, max_bytes: int = 10_000
+    publisher: FakePublisher,
+    *,
+    key: bytes = KEY,
+    max_bytes: int = 10_000,
+    outbox: SqliteOutbox | None = None,
+    now: datetime = NOW,
 ) -> SolutionSharer:
     return SolutionSharer(
-        publisher, Redactor(), node="laptop-ana", key=key, max_bytes=max_bytes, clock=lambda: NOW
+        publisher,
+        Redactor(),
+        node="laptop-ana",
+        key=key,
+        max_bytes=max_bytes,
+        outbox=outbox,
+        clock=lambda: now,
     )
+
+
+@pytest.fixture
+def outbox(tmp_path: Path) -> SqliteOutbox:
+    return SqliteOutbox(tmp_path / "outbox.sqlite3")
 
 
 def test_publishes_the_signature_patch_and_evidence() -> None:
@@ -103,6 +125,94 @@ def test_a_short_team_key_is_refused() -> None:
         sharer(FakePublisher(), key=b"short")
 
 
-def test_broker_failures_reach_the_caller() -> None:
+def test_without_an_outbox_broker_failures_reach_the_caller() -> None:
     with pytest.raises(SharingError, match="could not be reached"):
         sharer(FakePublisher(fail=True)).share(solution())
+
+
+def test_a_fix_the_broker_does_not_take_waits_in_the_outbox(outbox: SqliteOutbox) -> None:
+    receipt = sharer(FakePublisher(fail=True), outbox=outbox).share(solution())
+    assert not receipt.delivered and receipt.failure == DOWN
+    [waiting] = outbox.pending()
+    assert waiting.topic == TOPIC and waiting.attempts == 1 and waiting.last_error == DOWN
+    assert waiting.queued_at == NOW
+    assert waiting.solution == receipt.solution
+
+
+def test_what_waits_is_already_redacted(outbox: SqliteOutbox, tmp_path: Path) -> None:
+    sharer(FakePublisher(fail=True), outbox=outbox).share(solution(error=f"KeyError: '{AWS}'"))
+    assert AWS not in outbox.pending()[0].solution.error
+    assert AWS.encode() not in (tmp_path / "outbox.sqlite3").read_bytes()
+
+
+def test_resend_sends_what_waits_and_empties_the_outbox(outbox: SqliteOutbox) -> None:
+    down = FakePublisher(fail=True)
+    sharer(down, outbox=outbox).share(solution(signature="first"))
+    later = NOW + timedelta(minutes=5)
+    sharer(down, outbox=outbox, now=later).share(solution(signature="second"))
+
+    up = FakePublisher()
+    report = sharer(up, outbox=outbox, now=NOW + timedelta(hours=1)).resend()
+    assert report.sent == 2 and report.left == 0 and report.error is None
+    first, second = (unseal(message, KEY, max_bytes=10_000) for message in up.messages)
+    assert (first.signature, first.published_at) == ("first", NOW)
+    assert (second.signature, second.published_at) == ("second", later)
+    assert outbox.pending() == []
+
+
+def test_resend_stops_at_the_first_failure_and_counts_the_attempt(
+    outbox: SqliteOutbox,
+) -> None:
+    down = FakePublisher(fail=True)
+    sharer(down, outbox=outbox).share(solution(signature="first"))
+    sharer(down, outbox=outbox, now=NOW + timedelta(minutes=5)).share(solution(signature="second"))
+
+    report = sharer(down, outbox=outbox).resend()
+    assert report.sent == 0 and report.left == 2 and report.error == DOWN
+    attempts = {entry.solution.signature: entry.attempts for entry in outbox.pending()}
+    assert attempts == {"first": 2, "second": 1}
+
+
+def test_resend_only_sends_to_the_topic_it_was_meant_for(outbox: SqliteOutbox) -> None:
+    sharer(FakePublisher(fail=True), outbox=outbox).share(solution())
+    other_team = FakePublisher(topic="other-team/solutions/v1")
+    report = sharer(other_team, outbox=outbox).resend()
+    assert report.sent == 0 and report.error is None
+    assert other_team.messages == []
+    assert len(outbox.pending()) == 1
+
+
+def test_resend_signs_with_the_current_team_key(outbox: SqliteOutbox) -> None:
+    sharer(FakePublisher(fail=True), outbox=outbox).share(solution())
+    new_key = b"a-new-team-key-0123456789"
+    up = FakePublisher()
+    sharer(up, key=new_key, outbox=outbox).resend()
+    assert unseal(up.messages[0], new_key, max_bytes=10_000).signature == "abc123"
+
+
+def test_a_delivered_fix_drops_an_older_one_waiting_for_the_same_error(
+    outbox: SqliteOutbox,
+) -> None:
+    sharer(FakePublisher(fail=True), outbox=outbox).share(solution())
+    later = sharer(FakePublisher(), outbox=outbox, now=NOW + timedelta(minutes=5))
+    later.share(solution(explanation="A better default."))
+    assert outbox.pending() == []
+
+
+def test_an_entry_over_the_size_limit_is_dropped(outbox: SqliteOutbox) -> None:
+    sharer(FakePublisher(fail=True), outbox=outbox).share(solution())
+    up = FakePublisher()
+    report = sharer(up, outbox=outbox, max_bytes=100).resend()
+    assert report.dropped == 1 and report.sent == 0 and report.error is None
+    assert up.messages == [] and outbox.pending() == []
+
+
+def test_a_fix_that_cannot_be_kept_either_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "not-a-folder").write_text("")
+    broken = SqliteOutbox(tmp_path / "not-a-folder" / "outbox.sqlite3")
+    with pytest.raises(SharingError, match=f"{DOWN}; it could not be kept to send later"):
+        sharer(FakePublisher(fail=True), outbox=broken).share(solution())
+
+
+def test_resend_without_an_outbox_does_nothing() -> None:
+    assert sharer(FakePublisher()).resend().sent == 0

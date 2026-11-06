@@ -24,7 +24,6 @@ All five development phases are implemented. The broker requires a password per 
 
 **Known limitations:**
 
-- A fix that could not be sent because the broker was down is not sent again later.
 - Each node keeps one suggestion per error signature, so a newer valid fix replaces the earlier one, even if the earlier one suited another project better.
 - `healer listen` and the other commands use the same embedded Chroma database from separate processes. Each collection has one writer and the checks made showed no errors, but Chroma does not guarantee this mode.
 
@@ -142,6 +141,7 @@ Run each one inside the container, as `docker compose exec cli healer <command>`
 | `redact [FILE]` | Prints a text with its secrets hidden. |
 | `listen` | Receives the team's fixes and keeps them as suggestions, until stopped. |
 | `team` | Lists the suggestions received. |
+| `outbox` | Lists the accepted fixes the broker did not take. `--send` sends them now; `--discard` forgets them. |
 
 Add `--help` to any command to see its options.
 
@@ -480,8 +480,38 @@ shared     sent to the team as node laptop-ana on healer/solutions/v1 (... bytes
 - **What is sent** (one JSON message, schema version 1): the error signature and its summary, the patch's edits, the explanation, the model, the tokens it cost, the node and the evidence: the command, its exit code without the patch, and that the tests passed with it. Never whole files.
 - **Secrets.** The summary, explanation and command are redacted first. If the patch itself contains something that looks like a secret, it is not shared at all, because masking it would break it.
 - **Signed.** Each message carries an HMAC-SHA256 of its content made with `SHARE_KEY` (at least 16 characters), so receivers can reject forged or altered messages.
-- **Delivery.** QoS 1 (the broker confirms it), `MQTT_TIMEOUT_SECONDS` per step (10) and `MQTT_MAX_RETRIES` retries with backoff (2). If the broker cannot be reached, a warning is printed; the fix stays applied and the exit code does not change. Messages larger than `MAX_SHARE_BYTES` (256,000) are not sent.
+- **Delivery.** QoS 1 (the broker confirms it), `MQTT_TIMEOUT_SECONDS` per step (10) and `MQTT_MAX_RETRIES` retries with backoff (2). If the broker still does not take it, the fix waits in the outbox and is sent later; it stays applied either way and the exit code does not change. Messages larger than `MAX_SHARE_BYTES` (256,000) are not sent.
 - **Broker access.** Only the nodes added with `./broker.sh` can connect, each one with its own password. To use a broker outside this project, set `MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME` and `MQTT_PASSWORD`, plus `MQTT_TLS=true` and `MQTT_CA_CERT` if it uses TLS.
+
+### Fixes the broker did not take
+
+If the broker cannot be reached, or refuses this node, the fix is kept in the outbox, a small SQLite file in the `healer-data` volume, and sent later:
+
+```text
+applied    2 files changed in your workspace (+3 -2)
+sharing    sending the fix to the team through mosquitto:1883...
+warning: the fix was applied but not sent yet: the broker at mosquitto:1883 could not be reached: [Errno -3] Temporary failure in name resolution
+waiting    kept in the outbox: 'healer listen' sends it when the broker is back, or send it with 'healer outbox --send'
+```
+
+It is sent again on its own:
+
+- **By `healer listen`, with `SHARE_SOLUTIONS=true`:** right after each connection to the broker, and every `OUTBOX_RETRY_SECONDS` (300) while connected.
+- **By `healer run`:** once its next fix reaches the broker, the ones waiting are sent too.
+
+```text
+broker     cannot reach mosquitto:1883; retrying
+broker     connected to mosquitto:1883
+resent     1 fix waiting in the outbox
+```
+
+`healer outbox` lists what waits, `healer outbox --send` sends it now, and `healer outbox --discard` forgets it after asking. `healer doctor` says how many are waiting.
+
+- **What waits is what would have been sent:** already redacted. It is signed only when it is sent, with the team key of that moment, so a new `SHARE_KEY` does not leave it unreadable.
+- **One per error.** A newer fix for the same error replaces the one waiting, and once a newer one is delivered, the older one is dropped. Each keeps the time it was found, so receivers still keep whichever fix for that error was found last.
+- **Only to its team.** Each fix goes only to the topic it was meant for. If `MQTT_TOPIC` changes, it keeps waiting until the topic is that one again.
+- **A fix can arrive twice,** when `healer run` and `healer listen` send it at the same moment. Receivers ignore the second one as already known.
+- **A fix over `MAX_SHARE_BYTES`** can never be sent, so it is dropped when tried.
 
 ## Receiving fixes from the team
 

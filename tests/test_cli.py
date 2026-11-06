@@ -1,6 +1,8 @@
 import json
 import shutil
 import signal
+import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
@@ -10,11 +12,21 @@ import pytest
 from typer.testing import CliRunner
 
 from healer import cli
+from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.config import Settings
 from healer.domain.errors import ExecutionError, SharingError
 from healer.domain.patch import FileEdit, Patch, parse_patch
 from healer.domain.proposal import Proposal, TokenUsage
-from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, TeamMatch, seal
+from healer.domain.sharing import (
+    Evidence,
+    PendingShare,
+    ReceivedSolution,
+    ResendReport,
+    SharedSolution,
+    TeamMatch,
+    seal,
+    unseal,
+)
 from healer.factory import (
     build_code_index,
     build_diagnoser,
@@ -525,6 +537,8 @@ def test_run_apply_flags_skip_the_question(
 
 
 class FakePublisher:
+    topic = "healer/solutions/v1"
+
     def __init__(self) -> None:
         self.messages: list[bytes] = []
 
@@ -600,8 +614,16 @@ def test_a_sharing_failure_keeps_the_applied_fix(
     unreachable = runner.invoke(cli.app, [*command, "--share"])
     assert unreachable.exit_code == 0, unreachable.output
     assert "sharing    sending the fix to the team through 127.0.0.1:1..." in unreachable.stdout
-    assert "not shared: the broker at 127.0.0.1:1 could not be reached" in unreachable.output
+    assert (
+        "warning: the fix was applied but not sent yet: the broker at 127.0.0.1:1 could not "
+        "be reached" in unreachable.output
+    )
+    assert "waiting    kept in the outbox: 'healer listen' sends it when the broker is back" in (
+        unreachable.stdout
+    )
     assert "applied    2 files changed" in unreachable.stdout
+    listed = runner.invoke(cli.app, ["outbox"])
+    assert "1 fix waiting to be sent, oldest first" in listed.stdout
 
 
 class FakeBroker:
@@ -1130,3 +1152,250 @@ def test_savings_without_incidents() -> None:
     result = runner.invoke(cli.app, ["savings"])
     assert result.exit_code == 0
     assert "no incidents recorded yet" in result.stdout
+
+
+WAITING_AT = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
+
+
+def waiting_fix(topic: str = "healer/solutions/v1") -> PendingShare:
+    solution = SharedSolution(
+        node="laptop-ana",
+        published_at=WAITING_AT,
+        signature="b" * 64,
+        error="KeyError: 'db'",
+        patch=Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new='c.get("db")'),)),
+        explanation="Use a default.",
+        model="claude-sonnet-5-5",
+        tokens_spent=2_900,
+        evidence=Evidence(command="python -m pytest", exit_code_before=1, verified_at=WAITING_AT),
+    )
+    return PendingShare(
+        solution=solution,
+        topic=topic,
+        queued_at=WAITING_AT,
+        attempts=2,
+        last_error="the broker at mosquitto:1883 could not be reached",
+    )
+
+
+def keep_waiting(path: Path, *entries: PendingShare) -> None:
+    outbox = SqliteOutbox(path)
+    for entry in entries:
+        outbox.keep(entry)
+
+
+def test_outbox_lists_the_fixes_waiting(isolated_outbox: Path) -> None:
+    keep_waiting(isolated_outbox, waiting_fix(), waiting_fix(topic="other-team/solutions/v1"))
+    result = runner.invoke(cli.app, ["outbox"])
+    assert result.exit_code == 0, result.output
+    assert "2 fixes waiting to be sent, oldest first" in result.stdout
+    assert "2026-11-06 12:00 UTC  for healer/solutions/v1\n" in result.stdout
+    assert "for other-team/solutions/v1 (not the current MQTT_TOPIC)" in result.stdout
+    assert "error      KeyError: 'db'" in result.stdout
+    assert "files      app/cfg.py" in result.stdout
+    assert "tried      2 times, last: the broker at mosquitto:1883 could not be reached" in (
+        result.stdout
+    )
+
+
+def test_outbox_without_fixes_waiting() -> None:
+    result = runner.invoke(cli.app, ["outbox"])
+    assert result.exit_code == 0, result.output
+    assert "no fixes waiting; every shared fix reached the broker" in result.stdout
+
+
+def test_outbox_send_delivers_what_waits_for_this_topic(
+    isolated_outbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep_waiting(isolated_outbox, waiting_fix(), waiting_fix(topic="other-team/solutions/v1"))
+    monkeypatch.setenv("SHARE_KEY", TEAM_KEY)
+    publisher = FakePublisher()
+    monkeypatch.setattr(
+        cli, "build_solution_sharer", partial(build_solution_sharer, publisher=publisher)
+    )
+    result = runner.invoke(cli.app, ["outbox", "--send"])
+    assert result.exit_code == 0, result.output
+    assert "sending    the fixes waiting for healer/solutions/v1 through 127.0.0.1:1..." in (
+        result.stdout
+    )
+    assert "resent     1 fix waiting in the outbox" in result.stdout
+    assert "kept       1 fix for another topic, sent only when MQTT_TOPIC is that one again" in (
+        result.stdout
+    )
+    [message] = publisher.messages
+    assert unseal(message, TEAM_KEY.encode(), max_bytes=256_000).published_at == WAITING_AT
+    assert [e.topic for e in SqliteOutbox(isolated_outbox).pending()] == ["other-team/solutions/v1"]
+
+
+def test_outbox_send_says_what_still_waits_when_the_broker_is_down(
+    isolated_outbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    monkeypatch.setenv("SHARE_KEY", TEAM_KEY)
+    monkeypatch.setenv("MQTT_MAX_RETRIES", "0")
+    result = runner.invoke(cli.app, ["outbox", "--send"])
+    assert result.exit_code == 1, result.output
+    assert (
+        "waiting    1 fix still in the outbox: the broker at 127.0.0.1:1 could not be reached"
+        in result.stdout
+    )
+    [entry] = SqliteOutbox(isolated_outbox).pending()
+    assert entry.attempts == 3
+
+
+def test_outbox_send_drops_a_fix_over_the_size_limit(
+    isolated_outbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    monkeypatch.setenv("SHARE_KEY", TEAM_KEY)
+    monkeypatch.setenv("MAX_SHARE_BYTES", "100")
+    publisher = FakePublisher()
+    monkeypatch.setattr(
+        cli, "build_solution_sharer", partial(build_solution_sharer, publisher=publisher)
+    )
+    result = runner.invoke(cli.app, ["outbox", "--send"])
+    assert result.exit_code == 0, result.output
+    assert "dropped    1 fix over MAX_SHARE_BYTES, which could never be sent" in result.stdout
+    assert publisher.messages == [] and SqliteOutbox(isolated_outbox).pending() == []
+
+
+def test_outbox_send_needs_the_team_key(isolated_outbox: Path) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    result = runner.invoke(cli.app, ["outbox", "--send"])
+    assert result.exit_code == 2
+    assert "SHARE_KEY is not set" in result.output
+
+
+def test_outbox_discard_asks_first(isolated_outbox: Path) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    kept = runner.invoke(cli.app, ["outbox", "--discard"], input="n\n")
+    assert kept.exit_code == 0, kept.output
+    assert "discard 1 fix? The team will not receive them [y/N]: n" in kept.stdout
+    assert "kept       nothing was discarded" in kept.stdout
+    assert len(SqliteOutbox(isolated_outbox).pending()) == 1
+
+    gone = runner.invoke(cli.app, ["outbox", "--discard"], input="y\n")
+    assert gone.exit_code == 0, gone.output
+    assert "discarded  1 fix" in gone.stdout
+    assert SqliteOutbox(isolated_outbox).pending() == []
+
+
+def test_outbox_send_and_discard_together_is_refused() -> None:
+    result = runner.invoke(cli.app, ["outbox", "--send", "--discard"])
+    assert result.exit_code == 2
+    assert "choose --send or --discard, not both" in result.output
+
+
+def test_doctor_reports_fixes_waiting(
+    isolated_outbox: Path, broker: Callable[[str | None], None]
+) -> None:
+    assert "outbox" not in runner.invoke(cli.app, ["doctor"]).stdout
+    keep_waiting(isolated_outbox, waiting_fix())
+    result = runner.invoke(cli.app, ["doctor"])
+    assert "[info] outbox: 1 fix waiting to be sent; 'healer outbox' lists them" in result.stdout
+
+
+@pytest.mark.integration
+def test_run_also_sends_the_fixes_waiting_once_one_is_delivered(
+    sample: Path, scripted_llm: ScriptedLLM, team: FakePublisher, isolated_outbox: Path
+) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    result = runner.invoke(
+        cli.app, ["run", "python -m pytest tests/test_app.py", "--path", str(sample)], input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "shared     sent to the team as node laptop-ana" in result.stdout
+    assert "resent     1 fix waiting in the outbox" in result.stdout
+    assert len(team.messages) == 2
+    assert SqliteOutbox(isolated_outbox).pending() == []
+
+
+class ConnectedSubscriber:
+    """Connects, and is stopped once ``done`` is set, or after a few seconds."""
+
+    def __init__(self, done: threading.Event) -> None:
+        self.done = done
+
+    def run(self, on_message: Callable[[bytes], None], on_status: Callable[[str], None]) -> None:
+        on_status("connected to the broker")
+        self.done.wait(5)
+        raise KeyboardInterrupt
+
+    def stop(self) -> None:
+        pass
+
+
+class SignalingPublisher(FakePublisher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent = threading.Event()
+
+    def publish(self, message: bytes) -> None:
+        super().publish(message)
+        self.sent.set()
+
+
+def test_listen_sends_the_fixes_waiting_once_connected(
+    team_node: Callable[..., None], monkeypatch: pytest.MonkeyPatch, isolated_outbox: Path
+) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    monkeypatch.setenv("SHARE_SOLUTIONS", "true")
+    publisher = SignalingPublisher()
+    monkeypatch.setattr(
+        cli, "build_solution_sharer", partial(build_solution_sharer, publisher=publisher)
+    )
+    team_node(ConnectedSubscriber(publisher.sent))
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    assert "resent     1 fix waiting in the outbox" in result.stdout
+    assert len(publisher.messages) == 1
+    assert SqliteOutbox(isolated_outbox).pending() == []
+
+
+def test_listen_leaves_the_outbox_alone_with_sharing_off(
+    team_node: Callable[..., None], isolated_outbox: Path
+) -> None:
+    keep_waiting(isolated_outbox, waiting_fix())
+    team_node(FakeSubscriber(ending=KeyboardInterrupt()))
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    assert "resent" not in result.stdout
+    assert len(SqliteOutbox(isolated_outbox).pending()) == 1
+
+
+class CountingSharer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def resend(self) -> ResendReport:
+        self.calls += 1
+        return ResendReport()
+
+
+def wait_for(condition: Callable[[], bool], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_the_resender_tries_on_connecting_and_then_periodically_while_connected() -> None:
+    sharer = CountingSharer()
+    resender = cli._Resender(sharer, interval=0.02)
+    resender.start()
+    time.sleep(0.1)
+    assert sharer.calls == 0
+
+    resender.status("connected to the broker")
+    assert wait_for(lambda: sharer.calls >= 3)
+
+    resender.status("connection lost; retrying")
+    time.sleep(0.1)
+    settled = sharer.calls
+    time.sleep(0.1)
+    assert sharer.calls == settled
+
+    resender.stop()
+    assert "healer-resender" not in [thread.name for thread in threading.enumerate()]
