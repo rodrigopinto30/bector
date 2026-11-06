@@ -1,0 +1,12 @@
+# Vulnerabilities that pip-audit reports but that do not apply to this project, one per
+# line: the ID, then the reason. ./deps.sh audit ignores only these. Review them on every
+# upgrade, and remove an entry as soon as a fixed version is locked.
+#
+# chromadb 1.5.9, no fixed version yet. All four are in Chroma's HTTP server: its REST
+# endpoints, its tenants and its authorization providers. This project uses Chroma only
+# embedded, as a library (PersistentClient), with no server, no network listener and no
+# authorization provider, so none of that code runs.
+GHSA-f4j7-r4q5-qw2c  chromadb server: code injection through the create collection endpoint, before authentication
+GHSA-36p7-vc44-83pf  chromadb server: code injection through the update collection endpoint
+GHSA-2wm9-hf6c-p5cr  chromadb server: an authenticated user can reach any tenant's collections
+GHSA-xph7-9rjv-w5fr  chromadb server: SimpleRBACAuthorizationProvider ignores which tenant a permission is for
