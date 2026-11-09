@@ -17,6 +17,8 @@ Usage:
   ./panel.sh audit    check the locked packages against the known vulnerabilities
   ./panel.sh dev      a panel that reloads on every change, at http://localhost:3000,
                       with the data of the running panel container (./start.sh first)
+  ./panel.sh demo     real events, one at a time, on a demo panel at http://localhost:8766;
+                      ./panel.sh demo clean removes it. Your own data is never touched
   ./panel.sh npm ...  any npm command, such as: ./panel.sh npm install --save-exact NAME
 
 The packages come from panel/package-lock.json, with install scripts off. After changing
@@ -85,6 +87,10 @@ case "${1:-}" in
     echo "[panel] Open http://localhost:3000; stop with Ctrl+C."
     in_node -it --network "$network" -p 127.0.0.1:3000:3000 -e "PANEL_API=http://$api:8765" \
       "$NODE_IMAGE" npx next dev --hostname 0.0.0.0 --port 3000
+    ;;
+  demo)
+    shift
+    exec scripts/panel-demo.sh "$@"
     ;;
   npm)
     shift
