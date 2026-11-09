@@ -1,6 +1,7 @@
 """Builds concrete adapters from configuration. The only place that wires layers together."""
 
 import hashlib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,15 @@ import chromadb
 from chromadb.api.types import EmbeddingFunction
 
 from healer.adapters.anthropic_proposer import AnthropicProposer
+from healer.adapters.chroma_panel import ChromaPanelStore
 from healer.adapters.chroma_repository import ChromaSymbolRepository
 from healer.adapters.chroma_solutions import ChromaSolutionRepository
 from healer.adapters.chroma_team_solutions import ChromaTeamSolutions
 from healer.adapters.filesystem_patcher import FilesystemPatcher
+from healer.adapters.json_listener_status import JsonListenerStatus
 from healer.adapters.mqtt_publisher import MqttPublisher
 from healer.adapters.mqtt_subscriber import MqttSubscriber
+from healer.adapters.panel_server import LOCAL_HOSTS, PanelApp
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sandbox_client import SandboxServiceRunner
@@ -27,15 +31,18 @@ from healer.adapters.workspace_scanner import WorkspaceScanner
 from healer.config import Settings
 from healer.domain.errors import LLMError, SharingError
 from healer.domain.execution import CommandPolicy
+from healer.domain.panel import Check, CheckState
 from healer.domain.patch import PatchPolicy
 from healer.domain.ports import CommandRunner, PatchProposer, SolutionPublisher
 from healer.domain.proposal import Proposal
 from healer.domain.redaction import Redactor
+from healer.domain.sharing import MIN_KEY_LENGTH
 from healer.pipeline.repair import RepairPipeline
 from healer.services.code_index import CodeIndex
 from healer.services.diagnoser import Diagnoser
 from healer.services.fix_installer import FixInstaller
 from healer.services.fix_proposer import FixProposer
+from healer.services.panel import PanelReader, Probe
 from healer.services.sandbox_runner import SandboxRunner
 from healer.services.solution_ingester import SolutionIngester
 from healer.services.solution_sharer import SolutionSharer
@@ -246,8 +253,11 @@ def build_team_solutions(
     settings: Settings, embedding_function: EmbeddingFunction[Any] | None = None
 ) -> ChromaTeamSolutions:
     client = chromadb.PersistentClient(path=str(settings.chroma_path))
-    name = "team-" + hashlib.sha256(settings.mqtt_topic.encode()).hexdigest()[:16]
-    return ChromaTeamSolutions(client, name, embedding_function)
+    return ChromaTeamSolutions(client, _team_collection(settings), embedding_function)
+
+
+def _team_collection(settings: Settings) -> str:
+    return "team-" + hashlib.sha256(settings.mqtt_topic.encode()).hexdigest()[:16]
 
 
 def build_suggestion_finder(
@@ -270,6 +280,121 @@ def build_solution_ingester(
         key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
     )
+
+
+def build_listener_status(settings: Settings) -> JsonListenerStatus:
+    return JsonListenerStatus(settings.listener_status_path)
+
+
+def build_panel_reader(
+    settings: Settings, embedding_function: EmbeddingFunction[Any] | None = None
+) -> PanelReader:
+    """Reads what the other commands write. The broker is asked with a short timeout, so a
+    broker that is down never makes the panel wait long."""
+    client = chromadb.PersistentClient(path=str(settings.chroma_path))
+    projects = ChromaPanelStore(
+        client,
+        code_collection=lambda path: collection_name(Path(path)),
+        fixes_collection=lambda path: collection_name(Path(path), "solutions"),
+        team_collection=_team_collection(settings),
+        embedding_function=embedding_function,
+    )
+    quick = settings.model_copy(
+        update={"mqtt_timeout_seconds": min(settings.mqtt_timeout_seconds, 3.0)}
+    )
+    broker = f"{settings.mqtt_host}:{settings.mqtt_port}"
+    over = " over TLS" if settings.mqtt_tls else ""
+    sandbox = build_sandbox_client(settings)
+    return PanelReader(
+        node=settings.node_id,
+        topic=settings.mqtt_topic,
+        sharing=settings.share_solutions,
+        ledger=build_ledger(settings),
+        outbox=build_outbox(settings),
+        projects=projects,
+        listener=build_listener_status(settings),
+        checks=[
+            Probe(
+                key="broker",
+                name="Message broker",
+                target=build_publisher(quick),
+                ok=f"{broker} accepts {settings.mqtt_username or 'anonymous clients'}{over}",
+            ),
+            Probe(
+                key="sandbox",
+                name="Test sandbox",
+                target=sandbox,
+                ok="no network, no secrets, no access to your files",
+                off="off: the tests run in the cli container, with its access",
+            ),
+            _node_check(settings),
+            _sharing_check(settings),
+            _api_key_check(settings),
+        ],
+    )
+
+
+def build_panel_app(settings: Settings, *, extra_hosts: Iterable[str] = ()) -> PanelApp:
+    return PanelApp(
+        build_panel_reader(settings).snapshot,
+        settings.panel_pages,
+        allowed_hosts=LOCAL_HOSTS | {host.lower() for host in extra_hosts},
+    )
+
+
+def _node_check(settings: Settings) -> Check:
+    """Without NODE_ID each container takes its own name, so the team sees several nodes and
+    the listener cannot pick up what was sent while it was off."""
+    name = "Node name"
+    if "node_id" in settings.model_fields_set:
+        return Check(key="node", name=name, state=CheckState.OK, detail=settings.node_id)
+    return Check(
+        key="node",
+        name=name,
+        state=CheckState.WARNING if settings.share_solutions else CheckState.OFF,
+        detail=(
+            f"not set: each container uses its own name, this one {settings.node_id}; "
+            "add NODE_ID to .env to give this computer one name in the team"
+        ),
+    )
+
+
+def _sharing_check(settings: Settings) -> Check:
+    name = "Sharing"
+    key = settings.share_key.get_secret_value().strip() if settings.share_key else ""
+    if not settings.share_solutions:
+        return Check(
+            key="sharing",
+            name=name,
+            state=CheckState.OFF,
+            detail="off: set SHARE_SOLUTIONS=true to send accepted fixes",
+        )
+    if len(key) < MIN_KEY_LENGTH:
+        return Check(
+            key="sharing",
+            name=name,
+            state=CheckState.FAIL,
+            detail=f"on, but SHARE_KEY is missing or shorter than {MIN_KEY_LENGTH} characters",
+        )
+    return Check(
+        key="sharing",
+        name=name,
+        state=CheckState.OK,
+        detail=f"on, as node {settings.node_id} on {settings.mqtt_topic}",
+    )
+
+
+def _api_key_check(settings: Settings) -> Check:
+    name = "Anthropic API key"
+    key = settings.anthropic_api_key
+    if key is None or not key.get_secret_value().strip():
+        return Check(
+            key="api_key",
+            name=name,
+            state=CheckState.FAIL,
+            detail="not set: add ANTHROPIC_API_KEY to .env; fixes found before are still reused",
+        )
+    return Check(key="api_key", name=name, state=CheckState.OK, detail="set")
 
 
 def _team_key(settings: Settings) -> bytes:

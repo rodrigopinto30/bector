@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import uvicorn
 
 from healer import __version__
 from healer.adapters.log_reader import read_log
@@ -43,7 +44,9 @@ from healer.factory import (
     build_fix_installer,
     build_fix_proposer,
     build_ledger,
+    build_listener_status,
     build_outbox,
+    build_panel_app,
     build_publisher,
     build_repair_pipeline,
     build_sandbox_client,
@@ -53,6 +56,7 @@ from healer.factory import (
     build_subscriber,
     build_team_solutions,
 )
+from healer.services.listener_monitor import ListenerMonitor
 from healer.services.solution_sharer import SolutionSharer
 
 app = typer.Typer(help="Local-first autonomous code remediation system.", no_args_is_help=True)
@@ -1021,22 +1025,36 @@ def listen() -> None:
             "warning: NODE_ID is not set; what is sent while this node is off may be lost",
             err=True,
         )
+    monitor = ListenerMonitor(
+        build_listener_status(settings),
+        node=settings.node_id,
+        topic=settings.mqtt_topic,
+        warn=lambda line: typer.echo(f"warning: {line}", err=True),
+    )
     typer.echo(f"listening  as node {settings.node_id} on {settings.mqtt_topic}; stop with Ctrl+C")
 
     def on_message(data: bytes) -> None:
         try:
-            typer.echo(_ingested_line(ingester.ingest(data)))
+            ingested = ingester.ingest(data)
         except RejectedMessageError as exc:
+            monitor.count("rejected", _printable(str(exc)))
             typer.echo(f"rejected   {_printable(str(exc))}")
         except HealerError as exc:
             typer.echo(f"warning: a valid message could not be stored: {exc}", err=True)
+        else:
+            kept = ingested.outcome in (IngestOutcome.NEW, IngestOutcome.REPLACED)
+            line = _ingested_line(ingested)
+            monitor.count("received" if kept else "ignored", line.split(maxsplit=1)[1])
+            typer.echo(line)
 
     def on_status(status: str) -> None:
         typer.echo(f"broker     {status}")
+        monitor.connection(status)
         if resender is not None:
             resender.status(status)
 
     previous = signal.signal(signal.SIGTERM, _interrupt)
+    monitor.start()
     if resender is not None:
         resender.start()
     try:
@@ -1049,6 +1067,7 @@ def listen() -> None:
     finally:
         if resender is not None:
             resender.stop()
+        monitor.stop()
         signal.signal(signal.SIGTERM, previous)
 
 
@@ -1216,6 +1235,45 @@ def team() -> None:
         typer.echo(f"error      {_printable(solution.error)}")
         typer.echo(f"files      {_printable(', '.join(solution.patch.files))}")
         typer.echo(f"evidence   {_printable(solution.evidence.command)}")
+
+
+@app.command()
+def panel(
+    host: Annotated[
+        str, typer.Option(help="Address to listen on; the container uses 0.0.0.0")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535, help="Port to listen on")] = 8765,
+    allow_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow-host",
+            help="Also answer to this name; ./panel.sh dev uses it for a container name",
+        ),
+    ] = None,
+) -> None:
+    """Show this node in the browser: its health, savings, incidents and fixes. Read only.
+
+    It answers only to localhost, so other machines and other web sites cannot read it.
+    """
+    try:
+        application = build_panel_app(Settings(), extra_hosts=allow_host or [])
+    except HealerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(
+        f"panel      serving on {host}:{port}; open http://localhost:{port}; stop with Ctrl+C"
+    )
+    uvicorn.run(
+        application,
+        host=host,
+        port=port,
+        lifespan="off",
+        ws="none",
+        access_log=False,
+        server_header=False,
+        proxy_headers=False,
+        log_level="warning",
+    )
 
 
 if __name__ == "__main__":

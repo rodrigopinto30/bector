@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shutil
 import signal
@@ -7,11 +8,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
 
 from healer import cli
+from healer.adapters.json_listener_status import JsonListenerStatus
+from healer.adapters.panel_server import PanelApp
 from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.config import Settings
 from healer.domain.errors import ExecutionError, SharingError
@@ -31,6 +35,7 @@ from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
+    build_panel_reader,
     build_repair_pipeline,
     build_sandbox_runner,
     build_solution_ingester,
@@ -1399,3 +1404,112 @@ def test_the_resender_tries_on_connecting_and_then_periodically_while_connected(
 
     resender.stop()
     assert "healer-resender" not in [thread.name for thread in threading.enumerate()]
+
+
+def test_listen_keeps_a_record_of_itself_for_the_panel(
+    team_node: Callable[..., None], isolated_listener_status: Path
+) -> None:
+    team_node(
+        FakeSubscriber(
+            team_message(),
+            team_message(),
+            team_message(key="a-key-that-is-not-the-team-key"),
+            ending=KeyboardInterrupt(),
+        )
+    )
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    status = JsonListenerStatus(isolated_listener_status).load()
+    assert status is not None
+    assert (status.node, status.topic) == ("laptop-luis", "healer/solutions/v1")
+    assert (status.connection, status.connected) == ("connected to the broker", True)
+    assert (status.received, status.ignored, status.rejected) == (1, 1, 1)
+    assert status.stopped
+    assert [(event.kind, event.text) for event in reversed(status.recent)] == [
+        ("connection", "connected to the broker"),
+        ("received", "KeyError: 'db' from laptop-ana (1 file), kept as a suggestion"),
+        ("ignored", "KeyError: 'db' from laptop-ana (1 file): already known"),
+        ("rejected", "the signature does not match: forged or altered message"),
+        ("connection", "stopped"),
+    ]
+    assert "healer-heartbeat" not in [thread.name for thread in threading.enumerate()]
+
+
+def test_listen_runs_even_if_its_record_cannot_be_written(
+    team_node: Callable[..., None], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "blocked").write_text("not a folder")
+    monkeypatch.setenv("LISTENER_STATUS_PATH", str(tmp_path / "blocked" / "listener.json"))
+    team_node(FakeSubscriber(team_message(), ending=KeyboardInterrupt()))
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    assert "received   KeyError: 'db' from laptop-ana" in result.stdout
+    assert "warning: the panel will not see this listener" in result.output
+
+
+def test_panel_serves_this_node_to_localhost_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHROMA_PATH", str(tmp_path / "chroma"))
+    monkeypatch.setenv("NODE_ID", "laptop-luis")
+    served: dict[str, object] = {}
+
+    def run(app: PanelApp, **options: object) -> None:
+        served.update(options, app=app)
+
+    monkeypatch.setattr(cli.uvicorn, "run", run)
+    result = runner.invoke(cli.app, ["panel", "--port", "8799"])
+    assert result.exit_code == 0, result.output
+    assert "panel      serving on 127.0.0.1:8799; open http://localhost:8799" in result.stdout
+    assert (served["host"], served["port"]) == ("127.0.0.1", 8799)
+    assert (served["access_log"], served["server_header"]) == (False, False)
+    app = served["app"]
+    assert isinstance(app, PanelApp)
+
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b""}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/snapshot",
+        "headers": [(b"host", b"localhost:8799")],
+    }
+    asyncio.run(app(scope, receive, send))
+    snapshot = json.loads(cast(bytes, sent[1]["body"]))
+    assert snapshot["node"] == "laptop-luis"
+    checks = {check["key"]: check["state"] for check in snapshot["checks"]}
+    assert checks["broker"] == "fail"
+    assert checks["sandbox"] == "off"
+    assert checks["sharing"] == "off"
+    assert checks["listener"] == "off"
+    assert checks["outbox"] == "ok"
+    assert checks["node"] == "ok"
+
+
+def test_the_panel_explains_what_the_configuration_lacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHROMA_PATH", str(tmp_path / "chroma"))
+    monkeypatch.setenv("SHARE_SOLUTIONS", "true")
+    monkeypatch.setenv("SHARE_KEY", "short")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    checks = {check.key: check for check in build_panel_reader(Settings()).snapshot().checks}
+    assert checks["node"].state == "warning"
+    assert "add NODE_ID to .env" in checks["node"].detail
+    assert checks["sharing"].state == "fail"
+    assert "SHARE_KEY is missing or shorter than 16 characters" in checks["sharing"].detail
+    assert checks["api_key"].state == "fail"
+
+    monkeypatch.setenv("SHARE_KEY", TEAM_KEY)
+    monkeypatch.setenv("NODE_ID", "laptop-luis")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    checks = {check.key: check for check in build_panel_reader(Settings()).snapshot().checks}
+    assert (checks["node"].state, checks["node"].detail) == ("ok", "laptop-luis")
+    assert checks["sharing"].detail == "on, as node laptop-luis on healer/solutions/v1"
+    assert (checks["api_key"].state, checks["api_key"].detail) == ("ok", "set")

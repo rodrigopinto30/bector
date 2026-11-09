@@ -1,0 +1,6 @@
+out
+.next
+node_modules
+next-env.d.ts
+src/lib/fixtures
+package-lock.json

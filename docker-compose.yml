@@ -9,7 +9,7 @@ x-healer: &healer
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   env_file: .env
-  environment:
+  environment: &healer-environment
     MQTT_HOST: ${MQTT_HOST:-mosquitto}
     MQTT_PORT: ${MQTT_PORT:-1883}
     SANDBOX_SOCKET: /sandbox/run/runner.sock
@@ -17,6 +17,7 @@ x-healer: &healer
     CHROMA_PATH: /data/chroma
     LEDGER_PATH: /data/healer/ledger.sqlite3
     OUTBOX_PATH: /data/healer/outbox.sqlite3
+    LISTENER_STATUS_PATH: /data/healer/listener.json
   volumes:
     - .:/app
     - chroma-data:/data/chroma
@@ -92,6 +93,28 @@ services:
     container_name: healer-listener
     profiles: ["team"]
     command: ["healer", "listen"]
+
+  # The local panel, at http://localhost:8765 (PANEL_PORT) and for this computer only. It
+  # only reads: the code and the data it does not need to write are mounted read only, and
+  # it never sees the workspace.
+  panel:
+    <<: *healer
+    container_name: healer-panel
+    command: ["healer", "panel", "--host", "0.0.0.0", "--port", "8765"]
+    environment:
+      <<: *healer-environment
+      PANEL_PAGES: /opt/healer/panel
+    ports:
+      - "127.0.0.1:${PANEL_PORT:-8765}:8765"
+    volumes:
+      - .:/app:ro
+      - chroma-data:/data/chroma
+      - healer-data:/data/healer:ro
+      - sandbox-work:/sandbox:ro
+    working_dir: /app
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
 
 volumes:
   mosquitto-data:

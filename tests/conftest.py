@@ -57,6 +57,14 @@ def isolated_outbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_listener_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own listener status, so none can change what the panel shows."""
+    path = tmp_path / "listener.json"
+    monkeypatch.setenv("LISTENER_STATUS_PATH", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def no_sharing(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test sends solutions to the real broker: sharing is off and the broker unreachable.
 

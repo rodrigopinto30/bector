@@ -1,0 +1,253 @@
+import logging
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from healer.domain.errors import LedgerError, OutboxError, SharingError, StatusError
+from healer.domain.ledger import LedgerEntry, Resolution
+from healer.domain.listener import ListenerStatus
+from healer.domain.panel import Check, CheckState
+from healer.domain.patch import FileEdit, Patch
+from healer.domain.proposal import TokenUsage
+from healer.domain.repair import RepairStatus
+from healer.domain.sharing import Evidence, PendingShare, ReceivedSolution, SharedSolution
+from healer.domain.solution import Solution
+from healer.services.panel import PanelReader, Probe
+
+NOW = datetime(2026, 11, 9, 15, 0, tzinfo=UTC)
+TOPIC = "healer/solutions/v1"
+PATCH = Patch(edits=(FileEdit(path="app.py", old="x", new="y"),))
+
+
+def shared(signature: str = "b" * 64) -> SharedSolution:
+    return SharedSolution(
+        node="laptop-ana",
+        published_at=NOW,
+        signature=signature,
+        error="KeyError: 'db'",
+        patch=PATCH,
+        explanation="Use a default.",
+        model="claude-sonnet-5-5",
+        tokens_spent=100,
+        evidence=Evidence(command="pytest", exit_code_before=1, verified_at=NOW),
+    )
+
+
+class FakeLedger:
+    def __init__(self, entries: list[LedgerEntry] | None = None, error: Exception | None = None):
+        self._entries = entries or []
+        self._error = error
+
+    def record(self, entry: LedgerEntry) -> None:
+        raise AssertionError("the panel only reads")
+
+    def entries(self, since: datetime | None = None) -> list[LedgerEntry]:
+        if self._error is not None:
+            raise self._error
+        return self._entries
+
+
+class FakeOutbox:
+    def __init__(self, pending: list[PendingShare] | None = None, error: Exception | None = None):
+        self._pending = pending or []
+        self._error = error
+
+    def keep(self, pending: PendingShare) -> None:
+        raise AssertionError("the panel only reads")
+
+    def pending(self) -> list[PendingShare]:
+        if self._error is not None:
+            raise self._error
+        return self._pending
+
+    def remove(self, topic: str, signature: str, *, up_to: datetime) -> None:
+        raise AssertionError("the panel only reads")
+
+    def clear(self) -> int:
+        raise AssertionError("the panel only reads")
+
+
+class FakeProjects:
+    def __init__(self, team_error: Exception | None = None) -> None:
+        self.team_error = team_error
+        self.asked: list[str] = []
+
+    def symbols(self, project: str) -> int | None:
+        self.asked.append(project)
+        return 42 if project == "/workspace/shop" else None
+
+    def fixes(self, project: str) -> list[Solution]:
+        if project != "/workspace/shop":
+            return []
+        return [
+            Solution(
+                signature="a" * 64,
+                error="KeyError: 'db'",
+                patch=PATCH,
+                explanation="Use a default.",
+                model="claude-sonnet-5-5",
+                tokens_spent=100,
+                command="pytest",
+                exit_code_before=1,
+                verified_at=NOW,
+            )
+        ]
+
+    def team(self) -> list[ReceivedSolution]:
+        if self.team_error is not None:
+            raise self.team_error
+        return [ReceivedSolution(solution=shared(), received_at=NOW)]
+
+
+class FakeStatus:
+    def __init__(self, status: ListenerStatus | None = None, error: Exception | None = None):
+        self._status = status
+        self._error = error
+
+    def save(self, status: ListenerStatus) -> None:
+        raise AssertionError("the panel only reads")
+
+    def load(self) -> ListenerStatus | None:
+        if self._error is not None:
+            raise self._error
+        return self._status
+
+
+class Service:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    def check(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+
+def an_entry(project: str = "/workspace/shop") -> LedgerEntry:
+    return LedgerEntry(
+        recorded_at=NOW - timedelta(hours=1),
+        project=project,
+        signature="a" * 64,
+        error_type="KeyError",
+        status=RepairStatus.FIXED,
+        resolution=Resolution.MODEL,
+        model_attempts=1,
+        usage=TokenUsage(input_tokens=90, output_tokens=10),
+        tokens_saved=0,
+    )
+
+
+def reader(**overrides: object) -> PanelReader:
+    parts: dict[str, object] = {
+        "node": "laptop-luis",
+        "topic": TOPIC,
+        "sharing": True,
+        "ledger": FakeLedger([an_entry(), an_entry("/workspace/api")]),
+        "outbox": FakeOutbox(),
+        "projects": FakeProjects(),
+        "listener": FakeStatus(),
+        "clock": lambda: NOW,
+    }
+    parts.update(overrides)
+    return PanelReader(**parts)  # type: ignore[arg-type]
+
+
+def states(snapshot_checks: list[Check]) -> dict[str, CheckState]:
+    return {check.key: check.state for check in snapshot_checks}
+
+
+def test_a_snapshot_gathers_every_section() -> None:
+    snapshot = reader().snapshot()
+    assert (snapshot.node, snapshot.topic, snapshot.sharing) == ("laptop-luis", TOPIC, True)
+    assert snapshot.taken_at == NOW
+    assert snapshot.problems == {}
+    assert snapshot.savings.total.incidents == 2
+    assert snapshot.savings.days[-1].spent == 200
+    assert [i.project for i in snapshot.incidents] == ["/workspace/shop", "/workspace/api"]
+    assert {p.path: p.symbols for p in snapshot.projects} == {
+        "/workspace/shop": 42,
+        "/workspace/api": None,
+    }
+    assert snapshot.team[0].node == "laptop-ana"
+    assert states(snapshot.checks) == {"listener": CheckState.OFF, "outbox": CheckState.OK}
+
+
+def test_probes_ask_each_service_and_say_what_they_answered() -> None:
+    snapshot = reader(
+        checks=[
+            Probe(key="broker", name="Broker", target=Service(), ok="accepts this node"),
+            Probe(key="tls", name="TLS", target=Service(SharingError("handshake failed")), ok="-"),
+            Probe(key="sandbox", name="Sandbox", target=None, ok="-", off="off: tests run here"),
+            Check(key="api_key", name="Key", state=CheckState.OK, detail="set"),
+        ]
+    ).snapshot()
+    checks = {check.key: check for check in snapshot.checks}
+    assert (checks["broker"].state, checks["broker"].detail) == (
+        CheckState.OK,
+        "accepts this node",
+    )
+    assert (checks["tls"].state, checks["tls"].detail) == (CheckState.FAIL, "handshake failed")
+    assert (checks["sandbox"].state, checks["sandbox"].detail) == (
+        CheckState.OFF,
+        "off: tests run here",
+    )
+    assert checks["api_key"].state is CheckState.OK
+
+
+def test_fixes_waiting_in_the_outbox_need_attention() -> None:
+    waiting = PendingShare(
+        solution=shared(),
+        topic=TOPIC,
+        queued_at=NOW - timedelta(hours=3),
+        attempts=2,
+        last_error="down",
+    )
+    snapshot = reader(outbox=FakeOutbox([waiting, waiting])).snapshot()
+    outbox = next(check for check in snapshot.checks if check.key == "outbox")
+    assert (outbox.state, outbox.detail) == (CheckState.WARNING, "2 fixes are waiting to be sent")
+    assert outbox.since == NOW - timedelta(hours=3)
+    assert len(snapshot.outbox) == 2
+
+
+def test_a_section_that_cannot_be_read_is_empty_and_says_why() -> None:
+    snapshot = reader(
+        ledger=FakeLedger(error=LedgerError("The ledger has a corrupt record")),
+        outbox=FakeOutbox(error=OutboxError("Cannot open the outbox")),
+        listener=FakeStatus(error=StatusError("The listener status is corrupt")),
+    ).snapshot()
+    assert snapshot.problems == {
+        "savings": "The ledger has a corrupt record",
+        "outbox": "Cannot open the outbox",
+        "listener": "The listener status is corrupt",
+    }
+    assert snapshot.savings.total.incidents == 0
+    assert snapshot.incidents == []
+    assert snapshot.projects == []
+    assert snapshot.team[0].node == "laptop-ana"
+    assert states(snapshot.checks) == {"listener": CheckState.FAIL, "outbox": CheckState.FAIL}
+
+
+def test_an_unexpected_error_is_shown_and_logged_not_hidden(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    panel = reader(projects=FakeProjects(team_error=RuntimeError("database is locked")))
+    with caplog.at_level(logging.ERROR):
+        result = panel.snapshot()
+    assert result.problems["team"] == "RuntimeError: database is locked"
+    assert result.team == []
+    assert "The panel could not read team" in caplog.text
+
+
+def test_a_running_listener_is_reported_with_its_counts() -> None:
+    status = ListenerStatus(
+        node="laptop-luis",
+        topic=TOPIC,
+        connection="connected to mosquitto:1883",
+        connected=True,
+        started_at=NOW - timedelta(hours=1),
+        changed_at=NOW - timedelta(hours=1),
+        updated_at=NOW - timedelta(seconds=5),
+        received=3,
+    )
+    snapshot = reader(listener=FakeStatus(status)).snapshot()
+    assert snapshot.listener == status
+    assert states(snapshot.checks)["listener"] is CheckState.OK

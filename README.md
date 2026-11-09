@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. Every pull request is checked by a CI pipeline, and every commit by a local pre-commit check.
+All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. Every pull request is checked by a CI pipeline, and every commit by a local pre-commit check. A local panel shows all of it in the browser.
 
 | Phase | What it delivers | Status |
 | --- | --- | --- |
@@ -98,6 +98,7 @@ To stop everything:
 | `sandbox` | `healer-sandbox` | Runs the tests of each copy, with no network, no secrets and no access to your files. |
 | `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. Only the nodes added with `./broker.sh` can connect. |
 | `listener` | `healer-listener` | Optional. Runs `healer listen` in the background; it only starts with the `team` profile. |
+| `panel` | `healer-panel` | The panel at http://localhost:8765, for this computer only. It only reads. |
 
 In `docker compose exec cli healer doctor`, `cli` is the service and `healer doctor` is the command that runs inside it. If you get `service "healer" is not running`, the command is from before the service was renamed to `cli`; `./stop.sh` also removes the old container.
 
@@ -106,10 +107,12 @@ The project you want to analyze goes in the `workspace/` folder, which is mounte
 ### Verify that everything works
 
 ```bash
-docker compose ps                          # cli, mosquitto and sandbox should be "Up"
+docker compose ps                          # cli, mosquitto, panel and sandbox should be "Up"
 docker compose exec cli healer doctor      # the dependency checks should be [ok]
 docker compose exec -w /app cli pytest     # run the test suite
 ```
+
+Then open http://localhost:8765 to see the panel.
 
 ### Fix your first error
 
@@ -142,6 +145,7 @@ Run each one inside the container, as `docker compose exec cli healer <command>`
 | `listen` | Receives the team's fixes and keeps them as suggestions, until stopped. |
 | `team` | Lists the suggestions received. |
 | `outbox` | Lists the accepted fixes the broker did not take. `--send` sends them now; `--discard` forgets them. |
+| `panel` | Serves the panel. The `panel` container already runs it at http://localhost:8765. |
 
 Add `--help` to any command to see its options.
 
@@ -575,6 +579,31 @@ spent      1 attempt, 0 tokens in, 0 out; saved about 2040 tokens
 - A fix from the team is not stored in the local cache or shared again. `healer savings` counts it under `from team`, with the tokens the sending node reported, capped by `REPAIR_MAX_TOKENS`.
 - `--no-team` skips the team for one run.
 
+## The panel: see everything in the browser
+
+Open **http://localhost:8765**. `./start.sh` starts the panel with the rest of the services. It shows what this computer knows, refreshes every 5 seconds, and follows the light or dark mode of the system, or the one you pick.
+
+| Tab | What it shows |
+| --- | --- |
+| **Overview** | The same checks as `healer doctor`, plus the node name, the team listener and the outbox. Beside them, the recent activity, newest first: incidents, fixes received or waiting, and what the listener saw, with each new event lit up for a moment. Then the savings: tokens saved and spent, a chart per day split by the source that solved each incident (local cache, team or Claude), and how many incidents each source solved. Each chart can be shown as a table. |
+| **Incidents** | The last 50 incidents: when, which project, the error, what solved it and what it cost. |
+| **Projects** | For each project: how many symbols its index has, its incidents, and the fixes it keeps, each with its explanation, its evidence and the change, line by line. |
+| **Team** | The suggestions received from other nodes, with the node that sent them and the change. |
+| **Outbox** | The fixes waiting to be sent, with their attempts and the last error. |
+
+Each tab has its own address, such as http://localhost:8765/#incidents, so it can be bookmarked.
+
+- **It only reads.** It has no button that changes anything: fixes are still accepted, sent or discarded with the commands. Its container gets the code and the data volume read only, and never sees the workspace.
+- **Only this computer can open it.** The port is published on `127.0.0.1` only, and the panel answers only to the names `localhost`, `127.0.0.1` and `[::1]`. A web page from another site that makes its own name point to `127.0.0.1` (DNS rebinding) gets a refusal. Each page may run only its own scripts and ask only this server for data.
+- **A part that cannot be read does not hide the rest.** If, for example, the ledger is corrupt, the panel says so above the tabs and shows everything else.
+- **The team listener reports itself.** `healer listen` writes its connection, what it received, ignored and rejected, and a sign of life every 30 seconds to `LISTENER_STATUS_PATH`. A listener silent for 90 seconds is shown as not answering.
+- **Without `NODE_ID`,** each container takes its own name, so the panel warns about it.
+- To use another port, set `PANEL_PORT` in `.env` and run `./stop.sh && ./start.sh`.
+
+To watch the panel change, `./panel.sh demo` makes real events happen one at a time and shows them on a demo panel at http://localhost:8766: a teammate shares a fix, a forged message is refused, `healer run` fixes a bug with the teammate's fix, the broker goes down and a fix waits in the outbox, the broker comes back and the listener sends it, and the local cache fixes a second bug. It waits for Enter between events. The demo has its own data volume and its own topic (`MQTT_TOPIC` plus `/demo`), so it never touches your data, your workspace or your team, and it never asks Claude, so it costs no tokens. It does stop the broker for a moment. `./panel.sh demo clean` removes everything it created.
+
+The pages are written with Next.js, TypeScript, Tailwind and shadcn, in `panel/`. The image builds them into static files, and `healer panel` serves them together with the data at `/api/snapshot`, so Node never runs in the containers.
+
 ## Redaction: hide secrets before anything leaves the machine
 
 `healer redact` prints a file (or stdin) with every credential replaced by a `[REDACTED:<kind>]` placeholder, and reports on stderr how many were hidden. The file itself is never modified. The same redactor runs on everything sent to Claude or published to other nodes.
@@ -623,6 +652,8 @@ Tests use a fake embedding function and a fake model, so they never download any
 3. `mypy`.
 4. The whole test suite with coverage: at least 75% overall, and 85% for `domain` and `services`.
 5. `./deps.sh audit`.
+6. The checks of the panel, `./panel.sh check`: format, lint, types, tests and build.
+7. `./panel.sh audit`.
 
 If a step fails, the job also prints the logs of the services. It needs no secrets, because the tests never call the real API. The result appears in each pull request as the check **Build, lint, types, tests and audit**.
 
@@ -650,7 +681,9 @@ The workflow does not stop a merge by itself. To merge only when the check is gr
 [pre-commit] All checks passed.
 ```
 
-It takes about 12 seconds. A commit with no Python files, such as one with only documentation, is not checked. If a check fails, the commit is not made and its output says why.
+If the commit has files of `panel/`, it also runs `./panel.sh quick`: format, lint, types and tests, in a Node container.
+
+It takes about 12 seconds for Python files. A commit with no Python and no panel files, such as one with only documentation, is not checked. If a check fails, the commit is not made and its output says why.
 
 - **To skip it once:** `git commit --no-verify`.
 - **To turn it off:** `git config core.hooksPath .git/hooks`. `./start.sh` only turns it on when `core.hooksPath` is not set, so it stays off.
@@ -673,6 +706,24 @@ No known vulnerabilities found, 5 ignored
 - **The audit uses `pip-audit`** and fails on any known vulnerability, except those listed in `audit-exceptions.txt`, each with the reason it does not apply. Today these are the four vulnerabilities of chromadb 1.5.9, which has no fixed version yet: all of them are in Chroma's HTTP server, and this project uses Chroma only embedded, with no server. Remove an entry as soon as a fixed version is locked.
 - The lock is universal: it also has the packages and hashes for other platforms, such as Apple Silicon, so the images build the same way there.
 - The system packages of the image (`git`, `build-essential`) still come from Debian's repositories without pinned versions.
+
+### The panel's code
+
+The panel's tools run in a Node container (`node:26.13.0-trixie-slim`, the same image that builds the panel), as your own user, so the host does not need Node.
+
+```bash
+./panel.sh dev      # a panel that reloads on every change, at http://localhost:3000, with real data
+./panel.sh check    # format, lint, types, tests and build, as CI runs them
+./panel.sh format   # rewrite the files of panel/ in the project style
+./panel.sh audit    # check the locked packages against the known vulnerabilities
+./panel.sh demo     # real events, one at a time, on a demo panel at http://localhost:8766
+./panel.sh npm ...  # any npm command, such as: ./panel.sh npm install --save-exact NAME
+```
+
+- **The packages come from `panel/package-lock.json`,** which pins each one with its hash. `npm ci` installs exactly that, with install scripts off, both here and in the image. The audit fails on any known vulnerability.
+- **The CSS of shadcn is copied into `panel/src/styles/shadcn.css`,** so its command line, which brought vulnerable packages, is not a dependency. To add a component, run `./panel.sh npm exec --yes shadcn@4.23.0 add NAME`.
+- **The types of `panel/src/lib/types.ts` mirror `PanelSnapshot`** (`src/healer/domain/panel.py`). The sample `panel/src/lib/fixtures/snapshot.json` is checked by a Python test against the model, so a field changed on one side and not the other makes a test fail.
+- After changing `panel/`, run `./stop.sh && ./start.sh` so http://localhost:8765 serves the new build.
 
 ## The Chroma database
 
