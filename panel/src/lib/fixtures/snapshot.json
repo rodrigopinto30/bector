@@ -1,0 +1,657 @@
+{
+  "taken_at": "2026-11-09T15:00:00Z",
+  "node": "laptop-luis",
+  "topic": "healer/solutions/v1",
+  "sharing": true,
+  "checks": [
+    {
+      "key": "broker",
+      "name": "Message broker",
+      "state": "ok",
+      "detail": "mosquitto:1883 accepts laptop-luis over TLS",
+      "since": null
+    },
+    {
+      "key": "sandbox",
+      "name": "Test sandbox",
+      "state": "ok",
+      "detail": "no network, no secrets, no access to your files",
+      "since": null
+    },
+    {
+      "key": "sharing",
+      "name": "Sharing",
+      "state": "ok",
+      "detail": "on, as node laptop-luis on healer/solutions/v1",
+      "since": null
+    },
+    {
+      "key": "api_key",
+      "name": "Anthropic API key",
+      "state": "ok",
+      "detail": "set",
+      "since": null
+    },
+    {
+      "key": "listener",
+      "name": "Team listener",
+      "state": "ok",
+      "detail": "connected to mosquitto:1883",
+      "since": "2026-11-09T12:20:00Z"
+    },
+    {
+      "key": "outbox",
+      "name": "Outbox",
+      "state": "warning",
+      "detail": "1 fix is waiting to be sent",
+      "since": "2026-11-09T12:00:00Z"
+    }
+  ],
+  "listener": {
+    "node": "laptop-luis",
+    "topic": "healer/solutions/v1",
+    "connection": "connected to mosquitto:1883",
+    "connected": true,
+    "started_at": "2026-11-07T15:00:00Z",
+    "changed_at": "2026-11-09T12:20:00Z",
+    "updated_at": "2026-11-09T14:59:48Z",
+    "received": 3,
+    "ignored": 1,
+    "rejected": 1,
+    "stopped": false,
+    "recent": [
+      {
+        "at": "2026-11-09T14:10:00Z",
+        "kind": "rejected",
+        "text": "the signature does not match: forged or altered message"
+      },
+      {
+        "at": "2026-11-09T14:00:00Z",
+        "kind": "ignored",
+        "text": "sent by this node"
+      },
+      {
+        "at": "2026-11-09T12:20:00Z",
+        "kind": "connection",
+        "text": "connected to mosquitto:1883"
+      }
+    ]
+  },
+  "savings": {
+    "total": {
+      "key": "total",
+      "incidents": 11,
+      "fixed": 10,
+      "from_cache": 4,
+      "from_team": 2,
+      "model_attempts": 10,
+      "tokens_used": 54900,
+      "tokens_saved": 40600
+    },
+    "resolutions": {
+      "cache": 4,
+      "team": 2,
+      "model": 4,
+      "none": 1
+    },
+    "days": [
+      {
+        "day": "2026-10-11",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-12",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-13",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-14",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-15",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-16",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-17",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-18",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-19",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-20",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-21",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-22",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-23",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-24",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-25",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-26",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-27",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-28",
+        "incidents": 1,
+        "spent": 9400,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-29",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-30",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-10-31",
+        "incidents": 1,
+        "spent": 6100,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-01",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-02",
+        "incidents": 1,
+        "spent": 0,
+        "saved_by_cache": 9400,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-03",
+        "incidents": 0,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-04",
+        "incidents": 1,
+        "spent": 0,
+        "saved_by_cache": 0,
+        "saved_by_team": 4800
+      },
+      {
+        "day": "2026-11-05",
+        "incidents": 1,
+        "spent": 15200,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-06",
+        "incidents": 1,
+        "spent": 0,
+        "saved_by_cache": 6100,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-07",
+        "incidents": 1,
+        "spent": 21000,
+        "saved_by_cache": 0,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-08",
+        "incidents": 2,
+        "spent": 0,
+        "saved_by_cache": 15500,
+        "saved_by_team": 0
+      },
+      {
+        "day": "2026-11-09",
+        "incidents": 2,
+        "spent": 3200,
+        "saved_by_cache": 0,
+        "saved_by_team": 4800
+      }
+    ]
+  },
+  "incidents": [
+    {
+      "recorded_at": "2026-11-09T14:00:00Z",
+      "project": "/workspace/billing-api",
+      "signature": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "error_type": "ZeroDivisionError",
+      "status": "fixed",
+      "resolution": "team",
+      "model_attempts": 0,
+      "tokens_used": 0,
+      "tokens_saved": 4800
+    },
+    {
+      "recorded_at": "2026-11-09T11:00:00Z",
+      "project": "/workspace/shop",
+      "signature": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "error_type": "IndexError",
+      "status": "fixed",
+      "resolution": "model",
+      "model_attempts": 1,
+      "tokens_used": 3200,
+      "tokens_saved": 0
+    },
+    {
+      "recorded_at": "2026-11-08T13:00:00Z",
+      "project": "/workspace/shop",
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error_type": "KeyError",
+      "status": "fixed",
+      "resolution": "cache",
+      "model_attempts": 0,
+      "tokens_used": 0,
+      "tokens_saved": 9400
+    },
+    {
+      "recorded_at": "2026-11-08T10:00:00Z",
+      "project": "/workspace/billing-api",
+      "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "error_type": "TypeError",
+      "status": "fixed",
+      "resolution": "cache",
+      "model_attempts": 0,
+      "tokens_used": 0,
+      "tokens_saved": 6100
+    },
+    {
+      "recorded_at": "2026-11-07T11:00:00Z",
+      "project": "/workspace/shop",
+      "signature": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "error_type": "AssertionError",
+      "status": "out_of_attempts",
+      "resolution": "none",
+      "model_attempts": 3,
+      "tokens_used": 21000,
+      "tokens_saved": 0
+    },
+    {
+      "recorded_at": "2026-11-06T09:00:00Z",
+      "project": "/workspace/billing-api",
+      "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "error_type": "TypeError",
+      "status": "fixed",
+      "resolution": "cache",
+      "model_attempts": 0,
+      "tokens_used": 0,
+      "tokens_saved": 6100
+    },
+    {
+      "recorded_at": "2026-11-05T13:00:00Z",
+      "project": "/workspace/shop",
+      "signature": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "error_type": "AttributeError",
+      "status": "fixed",
+      "resolution": "model",
+      "model_attempts": 3,
+      "tokens_used": 15200,
+      "tokens_saved": 0
+    },
+    {
+      "recorded_at": "2026-11-04T12:00:00Z",
+      "project": "/workspace/billing-api",
+      "signature": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "error_type": "ZeroDivisionError",
+      "status": "fixed",
+      "resolution": "team",
+      "model_attempts": 0,
+      "tokens_used": 0,
+      "tokens_saved": 4800
+    },
+    {
+      "recorded_at": "2026-11-02T14:00:00Z",
+      "project": "/workspace/shop",
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error_type": "KeyError",
+      "status": "fixed",
+      "resolution": "cache",
+      "model_attempts": 0,
+      "tokens_used": 0,
+      "tokens_saved": 9400
+    },
+    {
+      "recorded_at": "2026-10-31T10:00:00Z",
+      "project": "/workspace/billing-api",
+      "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "error_type": "TypeError",
+      "status": "fixed",
+      "resolution": "model",
+      "model_attempts": 1,
+      "tokens_used": 6100,
+      "tokens_saved": 0
+    },
+    {
+      "recorded_at": "2026-10-28T13:00:00Z",
+      "project": "/workspace/shop",
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error_type": "KeyError",
+      "status": "fixed",
+      "resolution": "model",
+      "model_attempts": 2,
+      "tokens_used": 9400,
+      "tokens_saved": 0
+    }
+  ],
+  "projects": [
+    {
+      "path": "/workspace/billing-api",
+      "symbols": 96,
+      "incidents": 5,
+      "fixed": 5,
+      "last_incident": "2026-11-09T14:00:00Z",
+      "fixes": []
+    },
+    {
+      "path": "/workspace/shop",
+      "symbols": 214,
+      "incidents": 6,
+      "fixed": 5,
+      "last_incident": "2026-11-09T11:00:00Z",
+      "fixes": [
+        {
+          "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "error": "KeyError: 'db' in database_url (app/config.py)",
+          "explanation": "The configuration may not define the database: fall back to the default URL.",
+          "model": "claude-sonnet-5-5",
+          "tokens_spent": 9400,
+          "command": "python -m pytest",
+          "exit_code_before": 1,
+          "verified_at": "2026-10-28T13:00:00Z",
+          "edits": [
+            {
+              "path": "app/config.py",
+              "created": false,
+              "lines": [
+                {
+                  "kind": "context",
+                  "text": "def database_url(config):"
+                },
+                {
+                  "kind": "context",
+                  "text": "    \"\"\"The URL of the database.\"\"\""
+                },
+                {
+                  "kind": "removed",
+                  "text": "    return config[\"db\"]"
+                },
+                {
+                  "kind": "added",
+                  "text": "    return config.get(\"db\", DEFAULT_DB)"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "team": [
+    {
+      "signature": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "node": "laptop-ana",
+      "error": "ZeroDivisionError: division by zero in average (billing/totals.py)",
+      "explanation": "An empty list has no average: return 0 before dividing.",
+      "model": "claude-sonnet-5-5",
+      "tokens_spent": 4800,
+      "published_at": "2026-11-03T15:00:00Z",
+      "received_at": "2026-11-03T15:02:00Z",
+      "command": "python -m pytest",
+      "exit_code_before": 1,
+      "edits": [
+        {
+          "path": "billing/totals.py",
+          "created": false,
+          "lines": [
+            {
+              "kind": "context",
+              "text": "def average(amounts):"
+            },
+            {
+              "kind": "added",
+              "text": "    if not amounts:"
+            },
+            {
+              "kind": "added",
+              "text": "        return 0"
+            },
+            {
+              "kind": "context",
+              "text": "    return sum(amounts) / len(amounts)"
+            }
+          ]
+        },
+        {
+          "path": "tests/test_totals.py",
+          "created": true,
+          "lines": [
+            {
+              "kind": "added",
+              "text": "def test_average_of_nothing():"
+            },
+            {
+              "kind": "added",
+              "text": "    assert average([]) == 0"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "outbox": [
+    {
+      "signature": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "error": "AttributeError: 'NoneType' object has no attribute 'email' in notify (shop/mail.py)",
+      "topic": "healer/solutions/v1",
+      "for_current_topic": true,
+      "published_at": "2026-11-09T12:00:00Z",
+      "queued_at": "2026-11-09T12:00:00Z",
+      "attempts": 2,
+      "last_error": "the broker at mosquitto:1883 could not be reached: [Errno 111] Connection refused",
+      "edits": [
+        {
+          "path": "shop/mail.py",
+          "created": false,
+          "lines": [
+            {
+              "kind": "added",
+              "text": "    if user is None:"
+            },
+            {
+              "kind": "added",
+              "text": "        return"
+            },
+            {
+              "kind": "context",
+              "text": "    send(user.email, text)"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "activity": [
+    {
+      "at": "2026-11-09T14:10:00Z",
+      "kind": "rejected",
+      "state": "fail",
+      "title": "Message rejected",
+      "detail": "the signature does not match: forged or altered message"
+    },
+    {
+      "at": "2026-11-09T14:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "ZeroDivisionError fixed in billing-api",
+      "detail": "by the team, 0 tokens spent, 4,800 saved"
+    },
+    {
+      "at": "2026-11-09T14:00:00Z",
+      "kind": "ignored",
+      "state": "off",
+      "title": "Message ignored",
+      "detail": "sent by this node"
+    },
+    {
+      "at": "2026-11-09T12:20:00Z",
+      "kind": "connection",
+      "state": "ok",
+      "title": "Team listener",
+      "detail": "connected to mosquitto:1883"
+    },
+    {
+      "at": "2026-11-09T12:00:00Z",
+      "kind": "waiting",
+      "state": "warning",
+      "title": "Fix waiting to be sent",
+      "detail": "AttributeError: 'NoneType' object has no attribute 'email' in notify (shop/mail.py): the broker at mosquitto:1883 could not be reached: [Errno 111] Connection refused"
+    },
+    {
+      "at": "2026-11-09T11:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "IndexError fixed in shop",
+      "detail": "by Claude, 3,200 tokens spent"
+    },
+    {
+      "at": "2026-11-08T13:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "KeyError fixed in shop",
+      "detail": "by the local cache, 0 tokens spent, 9,400 saved"
+    },
+    {
+      "at": "2026-11-08T10:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "TypeError fixed in billing-api",
+      "detail": "by the local cache, 0 tokens spent, 6,100 saved"
+    },
+    {
+      "at": "2026-11-07T11:00:00Z",
+      "kind": "incident",
+      "state": "fail",
+      "title": "AssertionError not fixed in shop",
+      "detail": "out of attempts, 21,000 tokens spent"
+    },
+    {
+      "at": "2026-11-06T09:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "TypeError fixed in billing-api",
+      "detail": "by the local cache, 0 tokens spent, 6,100 saved"
+    },
+    {
+      "at": "2026-11-05T13:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "AttributeError fixed in shop",
+      "detail": "by Claude, 15,200 tokens spent"
+    },
+    {
+      "at": "2026-11-04T12:00:00Z",
+      "kind": "incident",
+      "state": "ok",
+      "title": "ZeroDivisionError fixed in billing-api",
+      "detail": "by the team, 0 tokens spent, 4,800 saved"
+    }
+  ],
+  "problems": {}
+}

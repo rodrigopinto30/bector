@@ -36,10 +36,16 @@ class ChromaSolutionRepository:
         metadatas = found["metadatas"] or []
         if not metadatas:
             return None
-        try:
-            return Solution.model_validate_json(str(metadatas[0]["solution_json"]))
-        except (KeyError, ValidationError) as exc:
-            raise IndexingError(f"Stored solution {signature[:12]} is corrupt") from exc
+        return _parse(metadatas[0], signature)
+
+    def all(self) -> list[Solution]:
+        """Every solution, the most recently verified first."""
+        found = self._collection.get(include=["metadatas"])
+        solutions = [
+            _parse(metadata, identifier)
+            for identifier, metadata in zip(found["ids"], found["metadatas"] or [], strict=True)
+        ]
+        return sorted(solutions, key=lambda s: s.verified_at, reverse=True)
 
     def save(self, solution: Solution) -> None:
         self._collection.upsert(
@@ -60,3 +66,10 @@ class ChromaSolutionRepository:
 
     def count(self) -> int:
         return self._collection.count()
+
+
+def _parse(metadata: Any, signature: str) -> Solution:
+    try:
+        return Solution.model_validate_json(str(metadata["solution_json"]))
+    except (KeyError, ValidationError) as exc:
+        raise IndexingError(f"Stored solution {signature[:12]} is corrupt") from exc

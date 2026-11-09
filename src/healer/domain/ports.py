@@ -8,6 +8,7 @@ from typing import Protocol
 from healer.domain.diagnosis import TracedError
 from healer.domain.execution import RunResult
 from healer.domain.ledger import LedgerEntry
+from healer.domain.listener import ListenerStatus
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
 from healer.domain.proposal import Proposal
@@ -202,4 +203,40 @@ class TeamSolutionRepository(Protocol):
 
     def similar(self, error: str, limit: int) -> list[TeamMatch]:
         """Return the suggestions whose error reads most like ``error``, closest first."""
+        ...
+
+
+class ListenerStatusStore(Protocol):
+    """Where the listener keeps the record of itself that the panel reads."""
+
+    def save(self, status: ListenerStatus) -> None:
+        """Replace the record. Raise ``StatusError`` if it cannot be written."""
+        ...
+
+    def load(self) -> ListenerStatus | None:
+        """Return the record, or None if the listener never ran."""
+        ...
+
+
+class ProjectStore(Protocol):
+    """What each project keeps, read without creating anything."""
+
+    def symbols(self, project: str) -> int | None:
+        """Return the symbols in the code index of ``project``, or None if never indexed."""
+        ...
+
+    def fixes(self, project: str) -> list[Solution]:
+        """Return the verified fixes of ``project``, the most recent first."""
+        ...
+
+    def team(self) -> list[ReceivedSolution]:
+        """Return the suggestions from the team, the most recently received first."""
+        ...
+
+
+class Checkable(Protocol):
+    """Something whose health can be checked, like the broker or the test sandbox."""
+
+    def check(self) -> None:
+        """Raise ``HealerError`` saying what is wrong."""
         ...

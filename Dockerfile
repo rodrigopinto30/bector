@@ -1,3 +1,14 @@
+# The panel's pages, built from its lock (panel/package-lock.json, checked by hash) with
+# install scripts off. Only the static files reach the final image: Node never runs there.
+FROM node:26.13.0-trixie-slim AS panel
+
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /panel
+COPY panel/package.json panel/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY panel/ ./
+RUN npm run build
+
 # The base image is pinned to a Python version and a Debian release.
 FROM python:3.11.18-slim-trixie
 
@@ -36,6 +47,7 @@ COPY src ./src
 RUN pip install --no-deps --no-build-isolation -e .
 
 COPY . .
+COPY --from=panel /panel/out /opt/healer/panel
 
 USER healer
 

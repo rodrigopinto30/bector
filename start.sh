@@ -100,4 +100,6 @@ if command -v git >/dev/null 2>&1 && [ -d .git ] && [ -z "$(git config --get cor
   log "Enabled the pre-commit checks (.githooks/pre-commit)."
 fi
 
+PANEL_PORT="$(grep -E '^PANEL_PORT=' .env | tail -n 1 | cut -d= -f2- || true)"
 log "Ready. Try: $DOCKER compose exec cli healer doctor"
+log "The panel is at http://localhost:${PANEL_PORT:-8765}"
