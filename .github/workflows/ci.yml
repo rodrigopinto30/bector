@@ -1,7 +1,8 @@
 # Every pull request and every push to main build the images and run, inside them, the
 # same checks as on a developer's machine (section 7.7 of the plan): the lock is current,
 # ruff, mypy, the whole test suite with coverage, against the real broker and sandbox,
-# the coverage of the domain and the services, and the dependency audit.
+# the coverage of the domain and the services, the checks of the panel, and the audit of
+# the Python and the panel dependencies.
 name: CI
 
 on:
@@ -54,6 +55,13 @@ jobs:
 
       - name: Dependency audit
         run: ./deps.sh audit
+
+      # Format, lint, types, tests and build, in a Node container, from panel/package-lock.json.
+      - name: Panel checks
+        run: ./panel.sh check
+
+      - name: Panel dependency audit
+        run: ./panel.sh audit
 
       - name: Logs of the services
         if: failure()

@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
-# Checks the Python files of a commit before it is made, inside the cli container: ruff
-# (lint and format) on those files, mypy, the fast tests, and the test files that changed.
-# A commit without Python files is not checked. To skip the checks once, run
-# git commit --no-verify.
+# Checks a commit before it is made. Python files, inside the cli container: ruff (lint
+# and format) on those files, mypy, the fast tests, and the test files that changed. Files
+# of the panel, in a Node container: format, lint, types and tests (./panel.sh quick). A
+# commit with neither is not checked. To skip the checks once, run git commit --no-verify.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-mapfile -t files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
-if [ "${#files[@]}" -eq 0 ]; then
-  exit 0
+say() { echo "[pre-commit] $*"; }
+
+mapfile -t panel < <(git diff --cached --name-only --diff-filter=ACMRD -- 'panel/')
+if [ "${#panel[@]}" -gt 0 ]; then
+  say "the panel (${#panel[@]} file(s)): format, lint, types and tests..."
+  if ! output=$(./panel.sh quick 2>&1); then
+    printf '%s\n' "$output"
+    exit 1
+  fi
 fi
 
-say() { echo "[pre-commit] $*"; }
+mapfile -t files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+if [ "${#files[@]}" -eq 0 ]; then
+  [ "${#panel[@]}" -gt 0 ] && say "All checks passed."
+  exit 0
+fi
 
 DOCKER="docker"
 if ! docker info >/dev/null 2>&1; then
