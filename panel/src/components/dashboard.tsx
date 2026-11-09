@@ -23,6 +23,9 @@ import type { Snapshot } from "@/lib/types"
 
 const TABS = ["overview", "incidents", "projects", "team", "outbox"]
 
+/** Fixed-height tabs that wrap to a second row on a narrow screen. */
+const TRIGGER = "h-8 flex-none"
+
 function subscribeToHash(onChange: () => void) {
   window.addEventListener("hashchange", onChange)
   return () => window.removeEventListener("hashchange", onChange)
@@ -150,8 +153,10 @@ function Content({ snapshot }: { snapshot: Snapshot }) {
         </Alert>
       ) : null}
       <Tabs value={tab} onValueChange={setTab} className="gap-6">
-        <TabsList className="h-auto max-w-full flex-wrap justify-start">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsList className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto">
+          <TabsTrigger value="overview" className={TRIGGER}>
+            Overview
+          </TabsTrigger>
           <Trigger value="incidents" label="Incidents" count={snapshot.incidents.length} />
           <Trigger value="projects" label="Projects" count={fixes} />
           <Trigger value="team" label="Team" count={snapshot.team.length} />
@@ -183,7 +188,7 @@ function Content({ snapshot }: { snapshot: Snapshot }) {
 
 function Trigger({ value, label, count }: { value: string; label: string; count: number }) {
   return (
-    <TabsTrigger value={value}>
+    <TabsTrigger value={value} className={TRIGGER}>
       {label}
       {count ? (
         <Badge variant="secondary" className="tabular-nums">
