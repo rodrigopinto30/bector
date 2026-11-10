@@ -189,12 +189,12 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
         icon={UserGroupIcon}
         tint="lavender"
         title="From the team"
-        description="Fixes other computers shared. Each one is only a suggestion: healer run tests it, and nothing is applied on its own."
+        description="Fixes other computers shared, several per error when they differ. Each one is only a suggestion: healer run tests it, and nothing is applied on its own."
       />
       {team.length ? (
         team.map((fix) => (
           <FixCard
-            key={fix.signature}
+            key={fix.fix_id}
             error={fix.error}
             signature={fix.signature}
             explanation={fix.explanation}
@@ -204,6 +204,7 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
               `received ${timeAgo(fix.received_at, now)}`,
               `found ${formatMoment(fix.published_at)}`,
               `${fix.command}: ${exitCode(fix.exit_code_before)} before, passed after`,
+              ...(fix.fixes_for_error > 1 ? [`${fix.fixes_for_error} fixes for this error`] : []),
             ]}
           />
         ))

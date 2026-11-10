@@ -19,19 +19,27 @@ SIGNATURE = "a" * 64
 
 
 class FakeStore:
+    """Kept by fix id, like the real store."""
+
     def __init__(self) -> None:
         self.saved: dict[str, ReceivedSolution] = {}
         self.writes = 0
 
-    def find(self, signature: str) -> ReceivedSolution | None:
-        return self.saved.get(signature)
+    def for_signature(self, signature: str) -> list[ReceivedSolution]:
+        same = [r for r in self.saved.values() if r.solution.signature == signature]
+        return sorted(same, key=lambda r: r.solution.published_at, reverse=True)
 
     def save(self, received: ReceivedSolution) -> None:
-        self.saved[received.solution.signature] = received
+        self.saved[received.solution.fix_id] = received
         self.writes += 1
 
-    def all(self) -> list[ReceivedSolution]:
-        return list(self.saved.values())
+    def remove(self, received: ReceivedSolution) -> None:
+        del self.saved[received.solution.fix_id]
+        self.writes += 1
+
+    def patches(self) -> list[Patch]:
+        """The kept patches, the most recently found first."""
+        return [r.solution.patch for r in self.for_signature(SIGNATURE)]
 
 
 def patch(new: str = 'c.get("db")', path: str = "app/cfg.py") -> Patch:
@@ -62,22 +70,29 @@ def message(
     return seal(solution, KEY)
 
 
-def ingester(store: FakeStore, *, node: str = "laptop-luis") -> SolutionIngester:
+def ingester(
+    store: FakeStore, *, node: str = "laptop-luis", fixes_per_error: int = 2
+) -> SolutionIngester:
     return SolutionIngester(
         store,
         PatchPolicy(max_files=2, max_bytes=1_000),
         node=node,
         key=KEY,
         max_bytes=10_000,
+        fixes_per_error=fixes_per_error,
         clock=lambda: NOW,
     )
+
+
+def hours(n: int) -> datetime:
+    return NOW + timedelta(hours=n)
 
 
 def test_a_valid_message_is_kept_with_its_origin_and_time() -> None:
     store = FakeStore()
     ingested = ingester(store).ingest(message())
     assert ingested.outcome is IngestOutcome.NEW
-    received = store.saved[SIGNATURE]
+    [received] = store.saved.values()
     assert received.solution.node == "laptop-ana" and received.received_at == NOW
 
 
@@ -85,27 +100,65 @@ def test_the_same_patch_again_changes_nothing() -> None:
     store = FakeStore()
     sut = ingester(store)
     sut.ingest(message())
-    later = message(node="laptop-eva", at=NOW + timedelta(hours=1))
+    later = message(node="laptop-eva", at=hours(1))
     assert sut.ingest(later).outcome is IngestOutcome.DUPLICATE
     assert store.writes == 1
-    assert store.saved[SIGNATURE].solution.node == "laptop-ana"
+    assert [r.solution.node for r in store.saved.values()] == ["laptop-ana"]
 
 
-def test_a_newer_patch_replaces_the_older_one() -> None:
+def test_another_patch_for_the_same_error_is_kept_beside_the_first() -> None:
     store = FakeStore()
     sut = ingester(store)
     sut.ingest(message())
-    newer = message(at=NOW + timedelta(hours=1), new='c.get("db", "x")')
-    assert sut.ingest(newer).outcome is IngestOutcome.REPLACED
-    assert store.saved[SIGNATURE].solution.patch == patch('c.get("db", "x")')
+    other = message(node="laptop-eva", at=hours(1), new='c.get("db", "x")')
+    assert sut.ingest(other).outcome is IngestOutcome.NEW
+    assert store.patches() == [patch('c.get("db", "x")'), patch()]
 
 
-def test_an_older_message_cannot_replace_a_newer_one() -> None:
+def test_an_older_patch_is_kept_too_while_there_is_room() -> None:
     store = FakeStore()
     sut = ingester(store)
-    sut.ingest(message(at=NOW + timedelta(hours=1), new='c.get("db", "x")'))
-    assert sut.ingest(message()).outcome is IngestOutcome.OLDER
-    assert store.saved[SIGNATURE].solution.patch == patch('c.get("db", "x")')
+    sut.ingest(message(at=hours(1), new='c.get("db", "x")'))
+    assert sut.ingest(message()).outcome is IngestOutcome.NEW
+    assert store.patches() == [patch('c.get("db", "x")'), patch()]
+
+
+def test_when_the_error_is_full_a_newer_patch_drops_the_oldest() -> None:
+    store = FakeStore()
+    sut = ingester(store)
+    sut.ingest(message(at=hours(1), new="first"))
+    sut.ingest(message(at=hours(2), new="second"))
+    assert sut.ingest(message(at=hours(3), new="third")).outcome is IngestOutcome.REPLACED
+    assert store.patches() == [patch("third"), patch("second")]
+
+
+@pytest.mark.parametrize("found", [hours(0), hours(1)], ids=["older", "same time"])
+def test_when_the_error_is_full_an_older_patch_is_ignored(found: datetime) -> None:
+    store = FakeStore()
+    sut = ingester(store)
+    sut.ingest(message(at=hours(1), new="first"))
+    sut.ingest(message(at=hours(2), new="second"))
+    writes = store.writes
+    assert sut.ingest(message(at=found, new="replayed")).outcome is IngestOutcome.OLDER
+    assert store.writes == writes
+    assert store.patches() == [patch("second"), patch("first")]
+
+
+def test_a_lower_limit_keeps_only_the_newest_fixes() -> None:
+    store = FakeStore()
+    roomy = ingester(store, fixes_per_error=3)
+    for n, name in enumerate(["first", "second", "third"], start=1):
+        roomy.ingest(message(at=hours(n), new=name))
+
+    tight = ingester(store, fixes_per_error=2)
+    assert tight.ingest(message(at=hours(4), new="fourth")).outcome is IngestOutcome.REPLACED
+    assert store.patches() == [patch("fourth"), patch("third")]
+    assert tight.ingest(message(at=hours(0), new="zero")).outcome is IngestOutcome.OLDER
+
+
+def test_an_error_must_keep_at_least_one_fix() -> None:
+    with pytest.raises(ValueError, match="at least one fix"):
+        ingester(FakeStore(), fixes_per_error=0)
 
 
 def test_a_node_ignores_its_own_messages() -> None:
@@ -156,5 +209,10 @@ def test_a_signed_message_with_an_unsafe_patch_is_rejected(unsafe: Patch, reason
 def test_a_short_team_key_is_refused() -> None:
     with pytest.raises(SharingError, match="at least 16 characters"):
         SolutionIngester(
-            FakeStore(), PatchPolicy(max_files=2, max_bytes=1), node="n", key=b"short", max_bytes=1
+            FakeStore(),
+            PatchPolicy(max_files=2, max_bytes=1),
+            node="n",
+            key=b"short",
+            max_bytes=1,
+            fixes_per_error=1,
         )

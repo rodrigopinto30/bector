@@ -139,3 +139,18 @@ def test_a_signed_message_must_still_follow_the_schema(
     change(body)
     with pytest.raises(RejectedMessageError, match="invalid format"):
         unseal(resigned(body), KEY, max_bytes=LIMIT)
+
+
+def test_a_fix_is_identified_by_its_error_and_its_edits() -> None:
+    fix = shared().fix_id
+    assert len(fix) == 64
+    same_fix_elsewhere = shared(
+        node="laptop-eva",
+        published_at=datetime(2026, 11, 1, tzinfo=UTC),
+        explanation="Another text.",
+        tokens_spent=1,
+    )
+    assert same_fix_elsewhere.fix_id == fix
+    other_edits = Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new="None"),))
+    assert shared(patch=other_edits).fix_id != fix
+    assert shared(signature="def456").fix_id != fix

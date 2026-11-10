@@ -45,6 +45,17 @@ class SharedSolution(BaseModel):
     tokens_spent: int = Field(ge=0)
     evidence: Evidence
 
+    @property
+    def fix_id(self) -> str:
+        """What identifies this fix: the error it fixes and the edits it makes (ADR 0021).
+
+        The same edits for the same error always give the same id, whoever found them and
+        whenever, so a fix is never stored twice. Other edits for that error give another.
+        """
+        edits = [edit.model_dump(mode="json") for edit in self.patch.edits]
+        body = canonical_json({"signature": self.signature, "edits": edits})
+        return hashlib.sha256(body).hexdigest()
+
     def as_proposal(self) -> Proposal:
         """The solution as a free proposal, so it can be tried like any other."""
         return Proposal(
@@ -123,9 +134,13 @@ class TeamMatch(BaseModel):
 
 class IngestOutcome(StrEnum):
     NEW = "new"
+    """Kept, beside any other fix for the same error."""
     REPLACED = "replaced"
+    """Kept; the error had as many fixes as allowed, so the oldest one made room."""
     DUPLICATE = "duplicate"
+    """The same edits for the same error were already kept."""
     OLDER = "older"
+    """Not kept: the error has as many fixes as allowed, all of them newer."""
     OWN = "own"
 
 

@@ -1,6 +1,7 @@
 """What the local panel shows: a read-only picture of this node, ready to be drawn."""
 
 import difflib
+from collections import Counter
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from enum import StrEnum
@@ -133,6 +134,8 @@ class TeamFixView(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    fix_id: str = Field(description="One per fix; an error may have several (ADR 0021).")
+    fixes_for_error: int = Field(ge=1, description="Suggestions kept for the same error.")
     signature: str
     node: str
     error: str
@@ -290,9 +293,20 @@ def fix_view(solution: Solution) -> FixView:
     )
 
 
-def team_fix_view(received: ReceivedSolution) -> TeamFixView:
+def team_fix_views(suggestions: list[ReceivedSolution]) -> list[TeamFixView]:
+    """Each suggestion, in the same order, with how many the team gave for its error."""
+    counts = Counter(received.solution.signature for received in suggestions)
+    return [
+        team_fix_view(received, fixes_for_error=counts[received.solution.signature])
+        for received in suggestions
+    ]
+
+
+def team_fix_view(received: ReceivedSolution, *, fixes_for_error: int = 1) -> TeamFixView:
     solution = received.solution
     return TeamFixView(
+        fix_id=solution.fix_id,
+        fixes_for_error=fixes_for_error,
         signature=solution.signature,
         node=solution.node,
         error=solution.error,

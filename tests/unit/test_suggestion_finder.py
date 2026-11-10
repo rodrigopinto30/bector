@@ -15,14 +15,16 @@ TARGET = Diagnosis(
 )
 
 
-def received(signature: str, error: str = "KeyError: 'db'") -> ReceivedSolution:
+def received(
+    signature: str, error: str = "KeyError: 'db'", *, new: str = "b", node: str = "laptop-ana"
+) -> ReceivedSolution:
     return ReceivedSolution(
         solution=SharedSolution(
-            node="laptop-ana",
+            node=node,
             published_at=NOW,
             signature=signature,
             error=error,
-            patch=Patch(edits=(FileEdit(path="app/cfg.py", old="a", new="b"),)),
+            patch=Patch(edits=(FileEdit(path="app/cfg.py", old="a", new=new),)),
             explanation="fix",
             model="claude-sonnet-5-5",
             tokens_spent=100,
@@ -34,17 +36,21 @@ def received(signature: str, error: str = "KeyError: 'db'") -> ReceivedSolution:
 
 class FakeStore:
     def __init__(
-        self, same: ReceivedSolution | None = None, nearby: tuple[TeamMatch, ...] = ()
+        self,
+        same: ReceivedSolution | tuple[ReceivedSolution, ...] | None = None,
+        nearby: tuple[TeamMatch, ...] = (),
     ) -> None:
-        self.same = same
+        self.same = (same,) if isinstance(same, ReceivedSolution) else same or ()
         self.nearby = nearby
         self.limits: list[int] = []
+        self.left_out: list[str] = []
 
-    def find(self, signature: str) -> ReceivedSolution | None:
-        return self.same
+    def for_signature(self, signature: str) -> list[ReceivedSolution]:
+        return list(self.same)
 
-    def similar(self, error: str, limit: int) -> list[TeamMatch]:
+    def similar(self, error: str, limit: int, *, other_than: str = "") -> list[TeamMatch]:
         self.limits.append(limit)
+        self.left_out.append(other_than)
         return list(self.nearby)[:limit]
 
 
@@ -65,6 +71,16 @@ def test_the_same_error_comes_first() -> None:
     matches = finder(FakeStore(same, (near("b" * 64),))).find(TARGET)
     assert [m.received.solution.signature for m in matches] == [SIGNATURE, "b" * 64]
     assert [m.same_signature for m in matches] == [True, False]
+
+
+def test_every_fix_for_the_same_error_comes_first_in_the_store_order() -> None:
+    newest = received(SIGNATURE, new="newest", node="laptop-eva")
+    oldest = received(SIGNATURE, new="oldest")
+    store = FakeStore((newest, oldest), (near("b" * 64),))
+    matches = finder(store).find(TARGET)
+    assert [m.received for m in matches[:2]] == [newest, oldest]
+    assert [m.same_signature for m in matches] == [True, True, False]
+    assert store.left_out == [SIGNATURE]
 
 
 def test_the_same_suggestion_is_not_offered_twice() -> None:

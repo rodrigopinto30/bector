@@ -765,14 +765,21 @@ def test_doctor_reports_whether_sharing_is_ready(
 TEAM_KEY = "0123456789abcdef-team-key"
 
 
-def team_message(error: str = "KeyError: 'db'", key: str = TEAM_KEY) -> bytes:
-    at = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
+def team_message(
+    error: str = "KeyError: 'db'",
+    key: str = TEAM_KEY,
+    *,
+    new: str = 'c.get("db")',
+    node: str = "laptop-ana",
+    hour: int = 12,
+) -> bytes:
+    at = datetime(2026, 10, 30, hour, 0, tzinfo=UTC)
     solution = SharedSolution(
-        node="laptop-ana",
+        node=node,
         published_at=at,
         signature="a" * 64,
         error=error,
-        patch=Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new='c.get("db")'),)),
+        patch=Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new=new),)),
         explanation="Use a default.",
         model="claude-sonnet-5-5",
         tokens_spent=2_900,
@@ -846,11 +853,40 @@ def test_listen_keeps_valid_messages_and_refuses_the_rest(team_node: Callable[..
 
     shown = runner.invoke(cli.app, ["team"])
     assert shown.exit_code == 0, shown.output
-    assert "1 suggestion from the team, newest first" in shown.stdout
+    assert "1 suggestion from the team for 1 error, newest first" in shown.stdout
     assert "from laptop-ana" in shown.stdout
     assert "error      KeyError: 'db'" in shown.stdout
     assert "files      app/cfg.py" in shown.stdout
     assert "evidence   python -m pytest" in shown.stdout
+
+
+def test_listen_keeps_several_fixes_for_one_error_up_to_the_limit(
+    team_node: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TEAM_FIXES_PER_ERROR", "2")
+    team_node(
+        FakeSubscriber(
+            team_message(new="first", hour=10),
+            team_message(new="second", node="laptop-eva", hour=11),
+            team_message(new="third", node="laptop-eva", hour=12),
+            team_message(new="replayed", hour=9),
+        )
+    )
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.stdout.splitlines() if "KeyError" in line]
+    assert lines == [
+        "received   KeyError: 'db' from laptop-ana (1 file), kept as a suggestion",
+        "received   KeyError: 'db' from laptop-eva (1 file), kept as a suggestion",
+        "received   KeyError: 'db' from laptop-eva (1 file), kept; "
+        "the oldest suggestion for this error made room",
+        "ignored    KeyError: 'db' from laptop-ana (1 file): "
+        "older than every suggestion kept for this error",
+    ]
+
+    shown = runner.invoke(cli.app, ["team"])
+    assert "2 suggestions from the team for 1 error, newest first" in shown.stdout
+    assert shown.stdout.count("from laptop-eva") == 2
 
 
 def test_text_from_other_nodes_cannot_control_the_terminal(

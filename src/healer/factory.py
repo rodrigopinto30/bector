@@ -279,6 +279,7 @@ def build_solution_ingester(
         node=settings.node_id,
         key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
+        fixes_per_error=settings.team_fixes_per_error,
     )
 
 
