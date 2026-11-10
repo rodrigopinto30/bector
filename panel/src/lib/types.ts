@@ -109,6 +109,10 @@ export type Project = {
 }
 
 export type TeamFix = {
+  /** One per fix; an error may have several. */
+  fix_id: string
+  /** Suggestions kept for the same error. */
+  fixes_for_error: number
   signature: string
   node: string
   error: string

@@ -16,6 +16,7 @@ from healer.domain.panel import (
     project_views,
     savings,
     team_fix_view,
+    team_fix_views,
     waiting_fix_view,
 )
 from healer.domain.patch import FileEdit, Patch
@@ -251,3 +252,34 @@ def test_recent_activity_mixes_every_source_newest_first() -> None:
     assert items[6].detail == "stopped, 500 tokens spent"
     assert items[7].detail == "by Claude, 1,200 tokens spent"
     assert len(activity(incidents=[], team=[], outbox=[], listener=status, limit=2)) == 2
+
+
+def team_suggestion(signature: str, new: str, node: str = "laptop-ana") -> ReceivedSolution:
+    solution = SharedSolution(
+        node=node,
+        published_at=NOW,
+        signature=signature,
+        error="KeyError: 'db'",
+        patch=Patch(edits=(FileEdit(path="app.py", old="x", new=new),)),
+        explanation="",
+        model="m",
+        tokens_spent=1,
+        evidence=Evidence(command="pytest", exit_code_before=1, verified_at=NOW),
+    )
+    return ReceivedSolution(solution=solution, received_at=NOW)
+
+
+def test_each_team_fix_has_its_own_id_and_the_count_for_its_error() -> None:
+    suggestions = [
+        team_suggestion("a" * 64, "y", node="laptop-eva"),
+        team_suggestion("b" * 64, "y"),
+        team_suggestion("a" * 64, "z"),
+    ]
+    views = team_fix_views(suggestions)
+    assert [(v.node, v.signature[0], v.fixes_for_error) for v in views] == [
+        ("laptop-eva", "a", 2),
+        ("laptop-ana", "b", 1),
+        ("laptop-ana", "a", 2),
+    ]
+    assert len({v.fix_id for v in views}) == 3
+    assert views[0].fix_id == suggestions[0].solution.fix_id

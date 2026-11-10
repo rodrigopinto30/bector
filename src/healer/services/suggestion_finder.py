@@ -8,7 +8,8 @@ _CANDIDATES_PER_MATCH = 3
 
 
 class SuggestionFinder:
-    """A fix for the same error signature first, then fixes for a nearly identical error.
+    """The fixes for the same error signature first, the most recently found first, then
+    fixes for a nearly identical error.
 
     Matching by meaning alone is too loose: a ``KeyError`` reads close to a
     ``ConnectionError`` that mentions the same word. So a similar error must also be of the
@@ -24,12 +25,14 @@ class SuggestionFinder:
 
     def find(self, target: Diagnosis) -> list[TeamMatch]:
         """Return at most ``max_matches`` suggestions, the most reliable first."""
-        same = self._store.find(target.signature)
-        matches = (
-            [] if same is None else [TeamMatch(received=same, distance=0, same_signature=True)]
-        )
+        matches = [
+            TeamMatch(received=same, distance=0, same_signature=True)
+            for same in self._store.for_signature(target.signature)
+        ]
         nearby = self._store.similar(
-            target.error.summary, self._max_matches * _CANDIDATES_PER_MATCH
+            target.error.summary,
+            self._max_matches * _CANDIDATES_PER_MATCH,
+            other_than=target.signature,
         )
         for match in nearby:
             solution = match.received.solution

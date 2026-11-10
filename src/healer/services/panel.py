@@ -24,7 +24,7 @@ from healer.domain.panel import (
     listener_check,
     project_views,
     savings,
-    team_fix_view,
+    team_fix_views,
     waiting_fix_view,
 )
 from healer.domain.ports import (
@@ -131,7 +131,7 @@ class PanelReader:
         return [waiting_fix_view(p, topic=self._topic) for p in self._outbox.pending()]
 
     def _team(self) -> list[TeamFixView]:
-        return [team_fix_view(received) for received in self._projects.team()]
+        return team_fix_views(self._projects.team())
 
     def _project_views(self, entries: list[LedgerEntry]) -> list[ProjectView]:
         paths = sorted({entry.project for entry in entries})

@@ -44,15 +44,56 @@ def repo(tmp_path: Path, fake_embeddings: FakeEmbeddingFunction) -> ChromaTeamSo
     return ChromaTeamSolutions(client, "team-test", fake_embeddings)
 
 
-def test_save_find_and_replace(repo: ChromaTeamSolutions) -> None:
-    assert repo.find("a" * 64) is None
+SIGNATURE = "a" * 64
+
+
+def test_several_fixes_for_one_error_are_kept_the_newest_first(
+    repo: ChromaTeamSolutions,
+) -> None:
+    assert repo.for_signature(SIGNATURE) == []
     first = received("a")
-    repo.save(first)
-    assert repo.find("a" * 64) == first
     second = received("a", new="None", at=NOW + timedelta(hours=1))
+    repo.save(first)
     repo.save(second)
-    assert repo.find("a" * 64) == second
+    assert repo.for_signature(SIGNATURE) == [second, first]
+    assert repo.for_signature("b" * 64) == []
+    assert repo.count() == 2
+
+
+def test_the_same_fix_is_stored_once(repo: ChromaTeamSolutions) -> None:
+    repo.save(received("a"))
+    again = received("a", at=NOW + timedelta(hours=1))
+    repo.save(again)
+    assert repo.for_signature(SIGNATURE) == [again]
     assert repo.count() == 1
+
+
+def test_remove_forgets_one_fix_and_keeps_the_others(repo: ChromaTeamSolutions) -> None:
+    first = received("a")
+    second = received("a", new="None", at=NOW + timedelta(hours=1))
+    repo.save(first)
+    repo.save(second)
+    repo.remove(first)
+    assert repo.for_signature(SIGNATURE) == [second]
+    repo.remove(first)
+    assert repo.count() == 1
+
+
+def test_a_record_saved_as_the_only_fix_of_its_error_is_still_used(
+    repo: ChromaTeamSolutions,
+) -> None:
+    """Before ADR 0021 the signature was the record id."""
+    old = received("a")
+    repo._collection.upsert(
+        ids=[SIGNATURE],
+        documents=[old.solution.error],
+        metadatas=[{"signature": SIGNATURE, "received_json": old.model_dump_json()}],
+    )
+    newer = received("a", new="None", at=NOW + timedelta(hours=1))
+    repo.save(newer)
+    assert repo.for_signature(SIGNATURE) == [newer, old]
+    repo.remove(old)
+    assert repo.for_signature(SIGNATURE) == [newer]
 
 
 def test_all_lists_the_most_recently_received_first(repo: ChromaTeamSolutions) -> None:
@@ -80,11 +121,23 @@ def test_similar_returns_the_closest_errors_first(repo: ChromaTeamSolutions) -> 
     assert [m.received for m in repo.similar("KeyError: 'db'", limit=1)] == [near]
 
 
+def test_similar_can_leave_out_the_fixes_of_one_error(repo: ChromaTeamSolutions) -> None:
+    same = received("a")
+    nearby = received("b", error="KeyError: 'database'")
+    repo.save(same)
+    repo.save(nearby)
+    matches = repo.similar("KeyError: 'db'", limit=5, other_than=SIGNATURE)
+    assert [m.received for m in matches] == [nearby]
+
+
 def test_a_corrupt_record_is_reported(repo: ChromaTeamSolutions) -> None:
-    repo.save(received("a"))
-    repo._collection.update(ids=["a" * 64], metadatas=[{"received_json": "{"}])
+    stored = received("a")
+    repo.save(stored)
+    repo._collection.update(
+        ids=[stored.solution.fix_id], metadatas=[{"signature": SIGNATURE, "received_json": "{"}]
+    )
     with pytest.raises(IndexingError, match="corrupt"):
-        repo.find("a" * 64)
+        repo.for_signature(SIGNATURE)
     with pytest.raises(IndexingError, match="corrupt"):
         repo.all()
     with pytest.raises(IndexingError, match="corrupt"):

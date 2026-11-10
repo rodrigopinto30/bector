@@ -134,31 +134,39 @@ $DOCKER compose run --rm -d --no-deps --name "$LISTENER" -v "$VOLUME:/demo" \
   "${DATA_ENV[@]}" cli healer listen >/dev/null
 sleep 4
 
-event "1/8  Open http://localhost:$PORT"
+event "1/9  Open http://localhost:$PORT"
 say "A new node, $NODE, with no incidents yet. Its team listener is connected: the"
 say "card Team listener is OK, with 0 received. The panel refreshes every 5 seconds,"
 say "and each new event lights up in green in Recent activity."
 pause
 
-event "2/8  A teammate shares a fix"
+event "2/9  A teammate shares a fix"
 helper teammate
 say "laptop-ana fixed a bug of this project on that computer and shared it. Tab Team:"
 say "one suggestion, with its change. The card Team listener counts 1 received."
 pause
 
-event "3/8  A forged message arrives"
+event "3/9  Another teammate shares a different fix for the same bug"
+helper rival
+say "laptop-eva fixed the same bug another way. Both fixes are kept: tab Team shows two"
+say "suggestions, each marked 2 fixes for this error. Team listener: 2 received."
+pause
+
+event "4/9  A forged message arrives"
 helper forged
 say "Someone without the team key sends a fix. The listener refuses it: 1 rejected,"
 say "and nothing new in the tab Team."
 pause
 
-event "4/8  healer run fixes the bug with the teammate's fix"
+event "5/9  healer run fixes the bug with a teammate's fix"
 fix_the_bug
-say "The fix was tested in the sandbox and applied, for 0 tokens. Overview: 1 incident,"
-say "solved by the team, and 2,900 tokens saved. Tabs Incidents and Projects show it too."
+say "laptop-eva's fix, the newest, was tried first: these tests reject it. Then"
+say "laptop-ana's passed in the sandbox and was applied, for 0 tokens. Overview: 1"
+say "incident, solved by the team, and 2,900 tokens saved. Tabs Incidents and Projects"
+say "show it too."
 pause
 
-event "5/8  The message broker goes down"
+event "6/9  The message broker goes down"
 broker_stopped=true
 $DOCKER compose stop mosquitto 2>&1 | tail -n 1
 sleep 3
@@ -166,14 +174,14 @@ say "The cards Message broker and Team listener stop being OK: the panel cannot 
 say "the broker, and the listener keeps retrying."
 pause
 
-event "6/8  This computer shares a fix of its own, but the broker is down"
+event "7/9  This computer shares a fix of its own, but the broker is down"
 helper share
 say "A fix this computer found with Claude for another bug is kept in its local cache and"
 say "shared. The broker is down, so it waits: tab Outbox, with the error, and the card"
 say "Outbox asks for attention. (The demo writes that fix itself, so Claude costs nothing.)"
 pause
 
-event "7/8  The broker comes back"
+event "8/9  The broker comes back"
 $DOCKER compose start mosquitto 2>&1 | tail -n 1
 broker_stopped=false
 sleep 6
@@ -181,7 +189,7 @@ say "The listener reconnects and sends what was waiting: the Outbox is empty aga
 say "listener ignores that message, because this node sent it: 1 ignored."
 pause
 
-event "8/8  The other bug shows up, and the local cache fixes it"
+event "9/9  The other bug shows up, and the local cache fixes it"
 helper bug
 fix_the_bug
 say "The local cache already had the fix, so it was tested and applied for 0 tokens, and"

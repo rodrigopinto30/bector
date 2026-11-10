@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     max_share_bytes: int = 256_000
     team_max_distance: float = 0.1
     team_max_suggestions: int = 3
+    team_fixes_per_error: int = Field(default=5, ge=1)
     sandbox_socket: Path | None = None
     sandbox_dir: Path | None = None
     test_command: str = "python -m pytest"

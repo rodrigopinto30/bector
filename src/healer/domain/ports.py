@@ -189,20 +189,27 @@ class SolutionSubscriber(Protocol):
 
 
 class TeamSolutionRepository(Protocol):
-    """Suggestions received from other nodes, one per error signature."""
+    """Suggestions received from other nodes: one per fix, several per error signature."""
 
-    def find(self, signature: str) -> ReceivedSolution | None: ...
+    def for_signature(self, signature: str) -> list[ReceivedSolution]:
+        """Return the suggestions for that error signature, the most recently found first."""
+        ...
 
     def save(self, received: ReceivedSolution) -> None:
-        """Store ``received``, replacing any earlier one for the same signature."""
+        """Store ``received``, replacing only a stored copy of the same fix."""
+        ...
+
+    def remove(self, received: ReceivedSolution) -> None:
+        """Forget the fix in ``received``; the other fixes for its error stay."""
         ...
 
     def all(self) -> list[ReceivedSolution]:
         """Return every suggestion, the most recently received first."""
         ...
 
-    def similar(self, error: str, limit: int) -> list[TeamMatch]:
-        """Return the suggestions whose error reads most like ``error``, closest first."""
+    def similar(self, error: str, limit: int, *, other_than: str = "") -> list[TeamMatch]:
+        """Return the suggestions whose error reads most like ``error``, closest first,
+        leaving out those for the error signature ``other_than``."""
         ...
 
 

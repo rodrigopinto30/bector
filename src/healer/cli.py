@@ -1128,11 +1128,11 @@ def _ingested_line(ingested: Ingested) -> str:
     if ingested.outcome is IngestOutcome.NEW:
         return f"received   {summary}, kept as a suggestion"
     if ingested.outcome is IngestOutcome.REPLACED:
-        return f"updated    {summary}, replaces the older suggestion"
+        return f"received   {summary}, kept; the oldest suggestion for this error made room"
     if ingested.outcome is IngestOutcome.DUPLICATE:
         return f"ignored    {summary}: already known"
     if ingested.outcome is IngestOutcome.OLDER:
-        return f"ignored    {summary}: older than the suggestion kept"
+        return f"ignored    {summary}: older than every suggestion kept for this error"
     return "ignored    sent by this node"
 
 
@@ -1227,7 +1227,11 @@ def team() -> None:
     if not suggestions:
         typer.echo("no suggestions yet; 'healer listen' receives them")
         return
-    typer.echo(f"{_plural(len(suggestions), 'suggestion')} from the team, newest first")
+    errors = len({received.solution.signature for received in suggestions})
+    typer.echo(
+        f"{_plural(len(suggestions), 'suggestion')} from the team for "
+        f"{_plural(errors, 'error')}, newest first"
+    )
     for received in suggestions:
         solution = received.solution
         typer.echo("")

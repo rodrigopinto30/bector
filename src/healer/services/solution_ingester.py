@@ -21,9 +21,12 @@ class SolutionIngester:
 
     A message must carry a valid signature, follow the schema, stay within the size limit,
     show that the tests failed before the patch, and hold a patch that follows the same
-    rules as any other. Valid messages are kept per error signature (7.6): the same patch
-    again changes nothing, an older one cannot replace a newer one, and a node ignores its
-    own messages. Nothing here applies or tests a patch.
+    rules as any other. Valid messages are kept per fix (ADR 0021): the same edits for the
+    same error again change nothing, so ingestion stays idempotent (7.6), while other edits
+    for that error are kept beside them. An error keeps at most ``fixes_per_error`` fixes,
+    the most recently found: a newer one makes room by dropping the oldest, and an older
+    one is ignored, so replaying old messages cannot push out newer fixes. A node ignores
+    its own messages. Nothing here applies or tests a patch.
     """
 
     def __init__(
@@ -34,14 +37,18 @@ class SolutionIngester:
         node: str,
         key: bytes,
         max_bytes: int,
+        fixes_per_error: int,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         check_key(key)
+        if fixes_per_error < 1:
+            raise ValueError("an error must keep at least one fix")
         self._store = store
         self._policy = policy
         self._node = node
         self._key = key
         self._max_bytes = max_bytes
+        self._fixes_per_error = fixes_per_error
         self._clock = clock
 
     def ingest(self, data: bytes) -> Ingested:
@@ -50,9 +57,20 @@ class SolutionIngester:
         self._check(solution)
         if solution.node == self._node:
             return Ingested(outcome=IngestOutcome.OWN, solution=solution)
-        outcome = self._outcome(solution)
-        if outcome in (IngestOutcome.NEW, IngestOutcome.REPLACED):
-            self._store.save(ReceivedSolution(solution=solution, received_at=self._clock()))
+        known = self._store.for_signature(solution.signature)
+        if any(k.solution.patch.edits == solution.patch.edits for k in known):
+            return Ingested(outcome=IngestOutcome.DUPLICATE, solution=solution)
+        arrived = ReceivedSolution(solution=solution, received_at=self._clock())
+        # The newest first; on a tie the one that just arrived goes last, so it never
+        # pushes out a fix found at the same moment.
+        ranked = sorted([*known, arrived], key=lambda k: k.solution.published_at, reverse=True)
+        dropped = ranked[self._fixes_per_error :]
+        if any(stale is arrived for stale in dropped):
+            return Ingested(outcome=IngestOutcome.OLDER, solution=solution)
+        self._store.save(arrived)
+        for stale in dropped:
+            self._store.remove(stale)
+        outcome = IngestOutcome.REPLACED if dropped else IngestOutcome.NEW
         return Ingested(outcome=outcome, solution=solution)
 
     def _check(self, solution: SharedSolution) -> None:
@@ -62,13 +80,3 @@ class SolutionIngester:
             self._policy.validate(solution.patch)
         except InvalidPatchError as exc:
             raise RejectedMessageError(f"the patch is not safe: {exc}") from exc
-
-    def _outcome(self, solution: SharedSolution) -> IngestOutcome:
-        known = self._store.find(solution.signature)
-        if known is None:
-            return IngestOutcome.NEW
-        if known.solution.patch.edits == solution.patch.edits:
-            return IngestOutcome.DUPLICATE
-        if solution.published_at <= known.solution.published_at:
-            return IngestOutcome.OLDER
-        return IngestOutcome.REPLACED

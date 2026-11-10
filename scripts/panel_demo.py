@@ -2,6 +2,8 @@
 
 project   write the demo project, with its first bug, to /demo/project
 teammate  a teammate, laptop-ana, shares the fix for the first bug, signed with the team key
+rival     another teammate, laptop-eva, shares a different fix for that bug, which these
+          tests reject
 forged    someone without the team key sends a fix
 share     this node keeps its own fix for a second bug, as healer run does after Claude
           finds one, and shares it with the team
@@ -60,6 +62,15 @@ TEAMMATE_FIX = Patch(
         ),
     )
 )
+RIVAL_FIX = Patch(
+    edits=(
+        FileEdit(
+            path="app/cfg.py",
+            old='    return config["db"]',
+            new='    return config.get("db")',
+        ),
+    )
+)
 OWN_FIX = Patch(
     edits=(
         FileEdit(
@@ -87,7 +98,13 @@ def diagnose(root: Path, settings: Settings, error_type: str) -> Diagnosis:
     raise SystemExit(f"the demo project shows no {error_type}; run: project")
 
 
-def teammate_fix(settings: Settings, node: str) -> SharedSolution:
+def teammate_fix(
+    settings: Settings,
+    node: str,
+    patch: Patch = TEAMMATE_FIX,
+    explanation: str = "The configuration may not name the database: use postgres by default.",
+    tokens: int = 2_900,
+) -> SharedSolution:
     target = diagnose(PROJECT, settings, "KeyError")
     now = datetime.now(UTC)
     return SharedSolution(
@@ -95,10 +112,10 @@ def teammate_fix(settings: Settings, node: str) -> SharedSolution:
         published_at=now,
         signature=target.signature,
         error=target.error.summary,
-        patch=TEAMMATE_FIX,
-        explanation="The configuration may not name the database: use postgres by default.",
+        patch=patch,
+        explanation=explanation,
         model="claude-sonnet-5-5",
-        tokens_spent=2_900,
+        tokens_spent=tokens,
         evidence=Evidence(command=settings.test_command, exit_code_before=1, verified_at=now),
     )
 
@@ -132,6 +149,15 @@ def main(command: str) -> None:
         write(PROJECT, FILES)
     elif command == "teammate":
         build_publisher(settings).publish(seal(teammate_fix(settings, "laptop-ana"), key))
+    elif command == "rival":
+        rival = teammate_fix(
+            settings,
+            "laptop-eva",
+            RIVAL_FIX,
+            "The configuration may not name the database: read it without failing.",
+            1_800,
+        )
+        build_publisher(settings).publish(seal(rival, key))
     elif command == "forged":
         forged = seal(teammate_fix(settings, "intruder"), b"not-the-team-key-0123456789")
         build_publisher(settings).publish(forged)

@@ -165,32 +165,39 @@ class FakeLedger:
 
 
 class FakeTeam:
-    """Suggestions kept by signature. It has no ``save`` or ``remove``: the loop only reads."""
+    """Suggestions, several per signature. It has no ``save`` or ``remove``: the loop only
+    reads."""
 
     def __init__(self, *stored: ReceivedSolution, fail: bool = False) -> None:
-        self.stored = {r.solution.signature: r for r in stored}
+        self.stored = list(stored)
         self.fail = fail
 
-    def find(self, signature: str) -> ReceivedSolution | None:
+    def for_signature(self, signature: str) -> list[ReceivedSolution]:
         if self.fail:
             raise IndexingError("Stored team solution abc is corrupt")
-        return self.stored.get(signature)
+        same = [r for r in self.stored if r.solution.signature == signature]
+        return sorted(same, key=lambda r: r.solution.published_at, reverse=True)
 
-    def similar(self, error: str, limit: int) -> list[TeamMatch]:
+    def similar(self, error: str, limit: int, *, other_than: str = "") -> list[TeamMatch]:
         return [
             TeamMatch(received=r, distance=0.0)
-            for r in self.stored.values()
-            if r.solution.error == error
+            for r in self.stored
+            if r.solution.error == error and r.solution.signature != other_than
         ][:limit]
 
 
 def suggestion(
-    answer: Patch, *, signature: str = KEY_ERROR.signature, tokens: int = 2_900
+    answer: Patch,
+    *,
+    signature: str = KEY_ERROR.signature,
+    tokens: int = 2_900,
+    node: str = "laptop-ana",
+    at: datetime = NOW,
 ) -> ReceivedSolution:
     return ReceivedSolution(
         solution=SharedSolution(
-            node="laptop-ana",
-            published_at=NOW,
+            node=node,
+            published_at=at,
             signature=signature,
             error="KeyError: 'db'",
             patch=answer,
@@ -612,7 +619,7 @@ def test_a_failed_suggestion_is_kept_and_the_model_never_sees_it() -> None:
         (AttemptSource.MODEL, AttemptOutcome.PASSED),
     ]
     assert proposer.calls == [(KEY_ERROR, ())]
-    assert team.find(KEY_ERROR.signature) is not None
+    assert team.for_signature(KEY_ERROR.signature) != []
 
 
 def test_a_suggestion_that_does_not_fit_moves_on_to_the_next_one() -> None:
@@ -629,6 +636,31 @@ def test_a_suggestion_that_does_not_fit_moves_on_to_the_next_one() -> None:
         AttemptOutcome.REJECTED,
         AttemptOutcome.PASSED,
     ]
+
+
+def test_several_fixes_for_the_same_error_are_tried_the_newest_first() -> None:
+    runner = FakeRunner(
+        report(KEY_ERROR),
+        {PARTIAL: report(KEY_ERROR, patch=PARTIAL), FULL: report(patch=FULL)},
+    )
+    older = suggestion(FULL, node="laptop-ana")
+    newer = suggestion(PARTIAL, node="laptop-eva", at=NOW + timedelta(hours=1))
+    asked: list[str] = []
+
+    def approve(match: TeamMatch) -> bool:
+        asked.append(match.received.solution.node)
+        return True
+
+    pipeline = build(runner, FakeProposer([]), team=FakeTeam(older, newer))
+
+    result = pipeline.run("python -m pytest", approve_team=approve)
+
+    assert asked == ["laptop-eva", "laptop-ana"]
+    assert [(a.origin, a.outcome) for a in result.attempts] == [
+        ("laptop-eva", AttemptOutcome.FAILED),
+        ("laptop-ana", AttemptOutcome.PASSED),
+    ]
+    assert result.status is RepairStatus.FIXED
 
 
 def test_a_suggestion_with_the_patch_that_just_failed_is_not_offered() -> None:

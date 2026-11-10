@@ -1,9 +1,9 @@
 """Chroma implementation of ``TeamSolutionRepository``."""
 
-from typing import Any
+from typing import Any, cast
 
 from chromadb.api import ClientAPI
-from chromadb.api.types import EmbeddingFunction
+from chromadb.api.types import EmbeddingFunction, Where
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from pydantic import ValidationError
 
@@ -12,7 +12,11 @@ from healer.domain.sharing import ReceivedSolution, TeamMatch
 
 
 class ChromaTeamSolutions:
-    """The error signature is the record id, so the same error is never stored twice (7.6).
+    """The fix id, from the error signature and the edits, is the record id, so the same
+    fix is never stored twice and several fixes for one error live side by side (ADR 0021).
+
+    Records saved before that, one per error, have the signature as their id. They are
+    found and removed through the signature kept in their metadata, like the others.
 
     The error summary is embedded so that similar errors can be matched by meaning. The
     collection belongs to the node, not to a workspace, because a signature means the
@@ -32,17 +36,14 @@ class ChromaTeamSolutions:
             configuration={"hnsw": {"space": "cosine"}},
         )
 
-    def find(self, signature: str) -> ReceivedSolution | None:
-        found = self._collection.get(ids=[signature], include=["metadatas"])
-        metadatas = found["metadatas"] or []
-        if not metadatas:
-            return None
-        return _parse(metadatas[0], signature)
+    def for_signature(self, signature: str) -> list[ReceivedSolution]:
+        records = [received for _, received in self._records(signature)]
+        return sorted(records, key=lambda r: r.solution.published_at, reverse=True)
 
     def save(self, received: ReceivedSolution) -> None:
         solution = received.solution
         self._collection.upsert(
-            ids=[solution.signature],
+            ids=[solution.fix_id],
             documents=[solution.error],
             metadatas=[
                 {
@@ -55,6 +56,16 @@ class ChromaTeamSolutions:
             ],
         )
 
+    def remove(self, received: ReceivedSolution) -> None:
+        fix = received.solution.fix_id
+        ids = [
+            identifier
+            for identifier, stored in self._records(received.solution.signature)
+            if stored.solution.fix_id == fix
+        ]
+        if ids:
+            self._collection.delete(ids=ids)
+
     def all(self) -> list[ReceivedSolution]:
         found = self._collection.get(include=["metadatas"])
         records = [
@@ -63,13 +74,15 @@ class ChromaTeamSolutions:
         ]
         return sorted(records, key=lambda r: r.received_at, reverse=True)
 
-    def similar(self, error: str, limit: int) -> list[TeamMatch]:
+    def similar(self, error: str, limit: int, *, other_than: str = "") -> list[TeamMatch]:
         total = self._collection.count()
         if total == 0 or limit < 1:
             return []
+        where = cast(Where, {"signature": {"$ne": other_than}}) if other_than else None
         found = self._collection.query(
             query_texts=[error],
             n_results=min(limit, total),
+            where=where,
             include=["metadatas", "distances"],
         )
         identifiers = found["ids"][0]
@@ -85,9 +98,16 @@ class ChromaTeamSolutions:
     def count(self) -> int:
         return self._collection.count()
 
+    def _records(self, signature: str) -> list[tuple[str, ReceivedSolution]]:
+        found = self._collection.get(where={"signature": signature}, include=["metadatas"])
+        return [
+            (identifier, _parse(metadata, identifier))
+            for identifier, metadata in zip(found["ids"], found["metadatas"] or [], strict=True)
+        ]
 
-def _parse(metadata: Any, signature: str) -> ReceivedSolution:
+
+def _parse(metadata: Any, identifier: str) -> ReceivedSolution:
     try:
         return ReceivedSolution.model_validate_json(str(metadata["received_json"]))
     except (KeyError, ValidationError) as exc:
-        raise IndexingError(f"Stored team solution {signature[:12]} is corrupt") from exc
+        raise IndexingError(f"Stored team solution {identifier[:12]} is corrupt") from exc
