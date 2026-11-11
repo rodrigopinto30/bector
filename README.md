@@ -24,7 +24,7 @@ All five development phases are implemented. The broker requires a password per 
 
 **Known limitations:**
 
-- The outbox keeps one fix per error. If the broker is down and this node finds two different fixes for the same error, only the newest is sent; receivers would have kept both.
+- Anyone with the team key can send results under any node name. Results only change the order in which the team's fixes are tried, and every fix is still tested here before it is offered.
 - `healer listen` and the other commands use the same embedded Chroma database from separate processes. Each collection has one writer and the checks made showed no errors, but Chroma does not guarantee this mode.
 
 ## How it works
@@ -143,8 +143,8 @@ Run each one inside the container, as `docker compose exec cli healer <command>`
 | `propose [LOG]` | Asks Claude to fix one error from a log and tests the patch on a copy. |
 | `redact [FILE]` | Prints a text with its secrets hidden. |
 | `listen` | Receives the team's fixes and keeps them as suggestions, until stopped. |
-| `team` | Lists the suggestions received. |
-| `outbox` | Lists the accepted fixes the broker did not take. `--send` sends them now; `--discard` forgets them. |
+| `team` | Lists the suggestions received, with the nodes where each one worked or failed. |
+| `outbox` | Lists the accepted fixes, and the results of the team's fixes, that the broker did not take. `--send` sends them now; `--discard` forgets them. |
 | `panel` | Serves the panel. The `panel` container already runs it at http://localhost:8765. |
 
 Add `--help` to any command to see its options.
@@ -509,10 +509,10 @@ broker     connected to mosquitto:1883
 resent     1 fix waiting in the outbox
 ```
 
-`healer outbox` lists what waits, `healer outbox --send` sends it now, and `healer outbox --discard` forgets it after asking. `healer doctor` says how many are waiting.
+`healer outbox` lists what waits, `healer outbox --send` sends it now, and `healer outbox --discard` forgets it after asking. `healer doctor` says how many are waiting. The results of the team's fixes tested here (see "Using the team's fixes") wait in the same outbox when the broker does not take them, and are sent the same way.
 
 - **What waits is what would have been sent:** already redacted. It is signed only when it is sent, with the team key of that moment, so a new `SHARE_KEY` does not leave it unreadable.
-- **One per error.** A newer fix for the same error replaces the one waiting, and once a newer one is delivered, the older one is dropped. Receivers keep several fixes per error, so this can lose one; it only happens when this node finds two different fixes for one error while the broker is down. Each fix keeps the time it was found.
+- **One per fix.** The same fix found again replaces its copy waiting, and once one copy is delivered, an older copy is dropped. Different fixes for the same error wait side by side, as receivers keep them. A result waits once per fix: a newer result of this node for that fix replaces it. An outbox from before this rule is moved to it on its first change.
 - **Only to its team.** Each fix goes only to the topic it was meant for. If `MQTT_TOPIC` changes, it keeps waiting until the topic is that one again.
 - **A fix can arrive twice,** when `healer run` and `healer listen` send it at the same moment. Receivers ignore the second one as already known.
 - **A fix over `MAX_SHARE_BYTES`** can never be sent, so it is dropped when tried.
@@ -533,6 +533,7 @@ broker     connected to mosquitto:1883
 received   KeyError: 'db' from laptop-ana (2 files), kept as a suggestion
 received   KeyError: 'db' from laptop-eva (1 file), kept as a suggestion
 ignored    KeyError: 'db' from laptop-ana (2 files): already known
+result     laptop-sol: the fix from laptop-ana for KeyError: 'db' worked there
 rejected   the signature does not match: forged or altered message
 rejected   the patch is not safe: Path '../../etc/passwd' is outside the project
 ```
@@ -544,10 +545,12 @@ rejected   the patch is not safe: Path '../../etc/passwd' is outside the project
 error      KeyError: 'db'
 files      app/cfg.py, app/net.py
 evidence   python -m pytest
+results    worked on 2 nodes
 ```
 
 - **Every message is untrusted.** In order: the size (`MAX_SHARE_BYTES`), the HMAC signature, the schema, that the evidence shows the tests failing before the patch, and that the patch follows the same rules as any other (paths inside the project, protected folders, size limits). A message that fails any check is refused and not stored.
-- **Several fixes per error, each kept once** (ingestion is idempotent). A fix is identified by its error signature and its edits, so the same patch again changes nothing, while a different patch for the same error is kept beside it: what fails in one project may be what another needs. An error keeps at most `TEAM_FIXES_PER_ERROR` (5), the most recently found: a newer one makes room by dropping the oldest (`kept; the oldest suggestion for this error made room`), and an older one is ignored, so replaying old messages cannot push out newer fixes. A node ignores its own messages. Each suggestion keeps its origin node and times.
+- **Several fixes per error, each kept once** (ingestion is idempotent). A fix is identified by its error signature and its edits, so the same patch again changes nothing, while a different patch for the same error is kept beside it: what fails in one project may be what another needs. An error keeps at most `TEAM_FIXES_PER_ERROR` (5), the best ranked (see "Using the team's fixes"): a new fix makes room by dropping the one ranked last (`kept; the one ranked last for this error made room`), and one that ranks below all of them is ignored. A new fix has no results yet, so among fixes nobody tried the newest wins, and replaying old messages cannot push out newer fixes. A node ignores its own messages. Each suggestion keeps its origin node and times.
+- **Results from other nodes.** They arrive on their own topic, `MQTT_TOPIC` plus `/results`, so nodes from before results never receive one. Each is signed and checked like a fix, and counts once per node and fix, its latest: `result     laptop-sol: the fix from laptop-ana for KeyError: 'db' worked there`. A result about a fix this node does not keep is ignored, so results cannot fill the disk. They are kept in a SQLite file (`RESULTS_PATH`, `/data/healer/results.sqlite3`).
 - **Nothing is lost while the node is off.** With a fixed `NODE_ID`, the broker keeps what is published after the node's first connection and delivers it on the next one. Without `NODE_ID`, the name changes when the container is recreated, and a warning says so.
 - **It stays connected.** Lost connections are retried with growing delays (up to 60 seconds). A broker that refuses the node ends the command with exit code `2`. `Ctrl+C` or `docker stop` shut it down cleanly.
 - Run only one listener per `NODE_ID`: the broker allows one connection per name.
@@ -573,7 +576,9 @@ spent      1 attempt, 0 tokens in, 0 out; saved about 2040 tokens
 
 - **Tested in the sandbox, at once.** Testing a suggestion executes code written on another machine. In the test sandbox that code has no network, no secrets and no access to your files, so it runs without asking. The sandbox cannot tell a fair fix from one that only fools the tests, so read the diff before applying it.
 - **Without the sandbox, it asks first.** When the tests run in this container (`SANDBOX_SOCKET` unset, as outside Docker), every edit is shown first and the question warns that the code will run with your access: `test this suggestion on a copy? Its code will run on this machine with your access [y/N]`. Without an answer, as in a script, nothing from the team runs.
-- **What counts as a match.** Every suggestion with the same error signature, the most recently found first, then those for an error of the same type whose summary is almost identical (`TEAM_MAX_DISTANCE`, 0.1). At most `TEAM_MAX_SUGGESTIONS` (3) are offered per run, one after another until one passes. The signature ignores concrete values, so check the error shown next to `fixes`.
+- **What counts as a match.** Every suggestion with the same error signature first, then those for an error of the same type whose summary is almost identical (`TEAM_MAX_DISTANCE`, 0.1). At most `TEAM_MAX_SUGGESTIONS` (3) are offered per run, one after another until one passes. The signature ignores concrete values, so check the error shown next to `fixes`.
+- **The fixes that worked most go first.** The suggestions for the same error are ordered by the share of nodes where each one worked, counting one vote for and one against from the start so that a single result never decides alone; then by how many nodes it worked on; then the newest. A fix nobody tried ranks above one that failed once and below one that worked once. Each suggestion shows its record before it is tested: `results    worked on 2 nodes, failed on 1 node`.
+- **Each result is told to the team.** When a suggestion's tests ran, this node records whether it worked here and, with sharing on, tells the team: `result     the fix from laptop-eva failed here; the team was told`. A result names the fix and its error, never code, a project or a path, and is signed with the team key. A suggestion that did not apply to this code, or that was declined, tells nothing. With sharing off, the result only counts on this node.
 - **Applying is a separate decision.** The fix is shown again as a diff and needs its own yes. `--apply` does not cover fixes from the team; `--no-apply` does.
 - **A suggestion that fails is not recommended,** and the next source is tried. It stays stored, because it may fit another project of this node. Declining one has the same effect.
 - **Team text never reaches Claude.** Failed suggestions are left out of what the model sees.
@@ -589,8 +594,8 @@ Open **http://localhost:8765**. `./start.sh` starts the panel with the rest of t
 | **Overview** | The same checks as `healer doctor`, plus the node name, the team listener and the outbox. Beside them, the recent activity, newest first: incidents, fixes received or waiting, and what the listener saw, with each new event lit up for a moment. Then the savings: tokens saved and spent, a chart per day split by the source that solved each incident (local cache, team or Claude), and how many incidents each source solved. Each chart can be shown as a table. |
 | **Incidents** | The last 50 incidents: when, which project, the error, what solved it and what it cost. |
 | **Projects** | For each project: how many symbols its index has, its incidents, and the fixes it keeps, each with its explanation, its evidence and the change, line by line. |
-| **Team** | The suggestions received from other nodes, with the node that sent them and the change. An error with several fixes says how many. |
-| **Outbox** | The fixes waiting to be sent, with their attempts and the last error. |
+| **Team** | The suggestions received from other nodes, with the node that sent them, the change, and the nodes where it worked or failed. An error with several fixes says in which order `healer run` tries them. |
+| **Outbox** | The fixes waiting to be sent, with their attempts and the last error. The Outbox card also counts the results waiting. |
 
 Each tab has its own address, such as http://localhost:8765/#incidents, so it can be bookmarked.
 
@@ -601,7 +606,7 @@ Each tab has its own address, such as http://localhost:8765/#incidents, so it ca
 - **Without `NODE_ID`,** each container takes its own name, so the panel warns about it.
 - To use another port, set `PANEL_PORT` in `.env` and run `./stop.sh && ./start.sh`.
 
-To watch the panel change, `./panel.sh demo` makes real events happen one at a time and shows them on a demo panel at http://localhost:8766: a teammate shares a fix, a second teammate shares a different fix for the same bug, a forged message is refused, `healer run` tries the newest fix, which fails here, and fixes the bug with the other one, the broker goes down and a fix waits in the outbox, the broker comes back and the listener sends it, and the local cache fixes a second bug. It waits for Enter between events. The demo has its own data volume and its own topic (`MQTT_TOPIC` plus `/demo`), so it never touches your data, your workspace or your team, and it never asks Claude, so it costs no tokens. It does stop the broker for a moment. `./panel.sh demo clean` removes everything it created.
+To watch the panel change, `./panel.sh demo` makes real events happen one at a time and shows them on a demo panel at http://localhost:8766: a teammate shares a fix, a second teammate shares a different fix for the same bug, a forged message is refused, `healer run` tries the newest fix, which fails here, fixes the bug with the other one and tells the team both results, a third teammate tells that a fix worked there, the broker goes down and a fix waits in the outbox, the broker comes back and the listener sends it, and the local cache fixes a second bug. It waits for Enter between events. The demo has its own data volume and its own topic (`MQTT_TOPIC` plus `/demo`), so it never touches your data, your workspace or your team, and it never asks Claude, so it costs no tokens. It does stop the broker for a moment. `./panel.sh demo clean` removes everything it created.
 
 The pages are written with Next.js, TypeScript, Tailwind and shadcn, in `panel/`. The image builds them into static files, and `healer panel` serves them together with the data at `/api/snapshot`, so Node never runs in the containers.
 

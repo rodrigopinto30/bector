@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -6,12 +7,17 @@ from healer.domain.errors import RejectedMessageError, SharingError
 from healer.domain.patch import FileEdit, Patch, PatchPolicy
 from healer.domain.sharing import (
     Evidence,
+    FixResult,
     IngestOutcome,
     ReceivedSolution,
+    ResultIngested,
+    ResultOutcome,
     SharedSolution,
     seal,
+    seal_result,
 )
 from healer.services.solution_ingester import SolutionIngester
+from tests.conftest import FakeResults
 
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
 KEY = b"0123456789abcdef-team-key"
@@ -71,11 +77,16 @@ def message(
 
 
 def ingester(
-    store: FakeStore, *, node: str = "laptop-luis", fixes_per_error: int = 2
+    store: FakeStore,
+    *,
+    node: str = "laptop-luis",
+    fixes_per_error: int = 2,
+    results: FakeResults | None = None,
 ) -> SolutionIngester:
     return SolutionIngester(
         store,
         PatchPolicy(max_files=2, max_bytes=1_000),
+        results=results if results is not None else FakeResults(),
         node=node,
         key=KEY,
         max_bytes=10_000,
@@ -139,7 +150,7 @@ def test_when_the_error_is_full_an_older_patch_is_ignored(found: datetime) -> No
     sut.ingest(message(at=hours(1), new="first"))
     sut.ingest(message(at=hours(2), new="second"))
     writes = store.writes
-    assert sut.ingest(message(at=found, new="replayed")).outcome is IngestOutcome.OLDER
+    assert sut.ingest(message(at=found, new="replayed")).outcome is IngestOutcome.OUTRANKED
     assert store.writes == writes
     assert store.patches() == [patch("second"), patch("first")]
 
@@ -153,7 +164,7 @@ def test_a_lower_limit_keeps_only_the_newest_fixes() -> None:
     tight = ingester(store, fixes_per_error=2)
     assert tight.ingest(message(at=hours(4), new="fourth")).outcome is IngestOutcome.REPLACED
     assert store.patches() == [patch("fourth"), patch("third")]
-    assert tight.ingest(message(at=hours(0), new="zero")).outcome is IngestOutcome.OLDER
+    assert tight.ingest(message(at=hours(0), new="zero")).outcome is IngestOutcome.OUTRANKED
 
 
 def test_an_error_must_keep_at_least_one_fix() -> None:
@@ -211,8 +222,83 @@ def test_a_short_team_key_is_refused() -> None:
         SolutionIngester(
             FakeStore(),
             PatchPolicy(max_files=2, max_bytes=1),
+            results=FakeResults(),
             node="n",
             key=b"short",
             max_bytes=1,
             fixes_per_error=1,
         )
+
+
+def solution_of(data: bytes) -> SharedSolution:
+    return SharedSolution.model_validate(json.loads(data)["solution"])
+
+
+def result_message(
+    fix: SharedSolution, *, node: str = "laptop-sol", worked: bool = True, at: datetime = NOW
+) -> bytes:
+    result = FixResult(
+        node=node, reported_at=at, signature=fix.signature, fix_id=fix.fix_id, worked=worked
+    )
+    return seal_result(result, KEY)
+
+
+def test_when_the_error_is_full_the_fix_that_works_least_makes_room() -> None:
+    store, results = FakeStore(), FakeResults()
+    sut = ingester(store, results=results)
+    failing = solution_of(message(at=hours(2), new="failing"))
+    sut.ingest(message(at=hours(1), new="working"))
+    sut.ingest(message(at=hours(2), new="failing"))
+    sut.ingest(result_message(failing, worked=False))
+    assert sut.ingest(message(at=hours(3), new="new")).outcome is IngestOutcome.REPLACED
+    assert store.patches() == [patch("new"), patch("working")]
+
+
+def test_a_fix_that_failed_and_comes_back_keeps_its_record() -> None:
+    store, results = FakeStore(), FakeResults()
+    sut = ingester(store, results=results, fixes_per_error=1)
+    sut.ingest(message(at=hours(1), new="failing"))
+    sut.ingest(result_message(solution_of(message(at=hours(1), new="failing")), worked=False))
+    assert sut.ingest(message(at=hours(2), new="new")).outcome is IngestOutcome.REPLACED
+    replayed = message(at=hours(1), new="failing")
+    assert sut.ingest(replayed).outcome is IngestOutcome.OUTRANKED
+    assert store.patches() == [patch("new")]
+
+
+def test_a_result_counts_once_per_node_for_a_fix_kept_here() -> None:
+    store, results = FakeStore(), FakeResults()
+    sut = ingester(store, results=results)
+    sut.ingest(message())
+    fix = solution_of(message())
+
+    counted = sut.ingest(result_message(fix))
+    assert isinstance(counted, ResultIngested)
+    assert (counted.outcome, counted.fix) == (ResultOutcome.COUNTED, fix)
+    again = sut.ingest(result_message(fix, at=hours(1)))
+    assert isinstance(again, ResultIngested) and again.outcome is ResultOutcome.KNOWN
+    changed = sut.ingest(result_message(fix, worked=False, at=hours(2)))
+    assert isinstance(changed, ResultIngested) and changed.outcome is ResultOutcome.COUNTED
+    assert results.tally([fix.fix_id])[fix.fix_id].failed == 1
+
+
+def test_a_result_about_an_unknown_fix_or_from_this_node_is_not_stored() -> None:
+    store, results = FakeStore(), FakeResults()
+    sut = ingester(store, results=results)
+    unknown = sut.ingest(result_message(solution_of(message())))
+    assert isinstance(unknown, ResultIngested) and unknown.outcome is ResultOutcome.UNKNOWN
+    sut.ingest(message())
+    own = sut.ingest(result_message(solution_of(message()), node="laptop-luis"))
+    assert isinstance(own, ResultIngested) and own.outcome is ResultOutcome.OWN
+    assert results.votes == {}
+
+
+def test_a_forged_result_is_rejected() -> None:
+    store = FakeStore()
+    sut = ingester(store)
+    sut.ingest(message())
+    fix = solution_of(message())
+    forged = FixResult(
+        node="laptop-sol", reported_at=NOW, signature=fix.signature, fix_id=fix.fix_id, worked=True
+    )
+    with pytest.raises(RejectedMessageError, match="forged or altered"):
+        sut.ingest(seal_result(forged, b"not-the-team-key-0123456789"))

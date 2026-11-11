@@ -166,3 +166,14 @@ def test_only_the_latest_events_are_kept_and_kept_short() -> None:
     assert len(recent) == RECENT_EVENTS
     assert recent[0].text.startswith(f"message {RECENT_EVENTS + 4} ")
     assert all(len(event.text) == EVENT_TEXT_CHARS for event in recent)
+
+
+def test_a_result_counts_as_received_and_keeps_its_own_kind() -> None:
+    store, clock, warnings = MemoryStore(), Clock(), []
+    watcher = monitor(store, clock, warnings)
+    watcher.start()
+    watcher.count("result", "laptop-sol: the fix from laptop-ana for KeyError worked there")
+    status = store.saved[-1]
+    assert (status.received, status.ignored) == (1, 0)
+    assert [(e.kind, e.text[:10]) for e in status.recent] == [("result", "laptop-sol")]
+    watcher.stop()

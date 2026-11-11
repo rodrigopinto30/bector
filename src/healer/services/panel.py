@@ -32,8 +32,10 @@ from healer.domain.ports import (
     Ledger,
     ListenerStatusStore,
     ProjectStore,
+    ResultStore,
     ShareOutbox,
 )
+from healer.domain.sharing import PendingResult
 from healer.domain.solution import Solution
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ class PanelReader:
         ledger: Ledger,
         outbox: ShareOutbox,
         projects: ProjectStore,
+        results: ResultStore,
         listener: ListenerStatusStore,
         checks: Sequence[Check | Probe] = (),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -76,6 +79,7 @@ class PanelReader:
         self._ledger = ledger
         self._outbox = outbox
         self._projects = projects
+        self._results = results
         self._listener = listener
         self._checks = checks
         self._clock = clock
@@ -91,6 +95,9 @@ class PanelReader:
             "listener", problems, self._listener.load, None
         )
         waiting: list[WaitingFixView] = self._read("outbox", problems, self._waiting, [])
+        results: list[PendingResult] = self._read(
+            "outbox", problems, self._outbox.pending_results, []
+        )
         team: list[TeamFixView] = self._read("team", problems, self._team, [])
         projects: list[ProjectView] = self._read(
             "projects", problems, lambda: self._project_views(entries), []
@@ -108,7 +115,7 @@ class PanelReader:
             )
         else:
             checks.append(listener_check(listener, now=now))
-        checks.append(self._outbox_check(waiting, problems.get("outbox")))
+        checks.append(self._outbox_check(waiting, results, problems.get("outbox")))
 
         summary: Savings = savings(entries, today=now.astimezone(UTC).date())
         return PanelSnapshot(
@@ -131,7 +138,9 @@ class PanelReader:
         return [waiting_fix_view(p, topic=self._topic) for p in self._outbox.pending()]
 
     def _team(self) -> list[TeamFixView]:
-        return team_fix_views(self._projects.team())
+        suggestions = self._projects.team()
+        tallies = self._results.tally(r.solution.fix_id for r in suggestions)
+        return team_fix_views(suggestions, tallies)
 
     def _project_views(self, entries: list[LedgerEntry]) -> list[ProjectView]:
         paths = sorted({entry.project for entry in entries})
@@ -151,25 +160,34 @@ class PanelReader:
         return Check(key=item.key, name=item.name, state=CheckState.OK, detail=item.ok)
 
     @staticmethod
-    def _outbox_check(waiting: list[WaitingFixView], problem: str | None) -> Check:
+    def _outbox_check(
+        waiting: list[WaitingFixView], results: list[PendingResult], problem: str | None
+    ) -> Check:
         name = "Outbox"
         if problem is not None:
             return Check(key="outbox", name=name, state=CheckState.FAIL, detail=problem)
-        if not waiting:
+        if not waiting and not results:
             return Check(
                 key="outbox",
                 name=name,
                 state=CheckState.OK,
-                detail="empty: every shared fix reached the broker",
+                detail="empty: every shared fix and result reached the broker",
             )
-        count = len(waiting)
-        noun = "fix is" if count == 1 else "fixes are"
+        parts = [
+            f"{count} {noun if count == 1 else plural}"
+            for count, noun, plural in (
+                (len(waiting), "fix", "fixes"),
+                (len(results), "result", "results"),
+            )
+            if count
+        ]
+        verb = "is" if len(waiting) + len(results) == 1 else "are"
         return Check(
             key="outbox",
             name=name,
             state=CheckState.WARNING,
-            detail=f"{count} {noun} waiting to be sent",
-            since=min(w.queued_at for w in waiting),
+            detail=f"{' and '.join(parts)} {verb} waiting to be sent",
+            since=min([w.queued_at for w in waiting] + [r.queued_at for r in results]),
         )
 
     @staticmethod

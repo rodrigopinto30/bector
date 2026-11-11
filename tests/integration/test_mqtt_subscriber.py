@@ -31,7 +31,7 @@ def listening(topic: str, client_id: str, received: list[bytes]) -> Iterator[Non
     subscriber = MqttSubscriber(
         host=HOST,
         port=PORT,
-        topic=topic,
+        topics=(topic, f"{topic}/results"),
         client_id=client_id,
         username=USERNAME,
         password=PASSWORD,
@@ -79,5 +79,24 @@ def test_what_is_sent_while_the_node_is_off_arrives_when_it_returns() -> None:
         publisher.publish(b"while off")
         with listening(topic, client_id, later):
             wait_until(lambda: later == [b"while off"])
+    finally:
+        forget_session(client_id)
+
+
+def test_results_arrive_through_their_own_topic() -> None:
+    topic, client_id = topic_for(uuid.uuid4().hex), f"healer-test-{uuid.uuid4().hex}"
+    publisher = MqttPublisher(
+        host=HOST,
+        port=PORT,
+        topic=f"{topic}/results",
+        client_id="healer-test",
+        username=USERNAME,
+        password=PASSWORD,
+    )
+    received: list[bytes] = []
+    try:
+        with listening(topic, client_id, received):
+            publisher.publish(b"a result")
+            wait_until(lambda: received == [b"a result"])
     finally:
         forget_session(client_id)

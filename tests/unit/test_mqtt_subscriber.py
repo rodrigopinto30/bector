@@ -21,7 +21,7 @@ def test_an_unreachable_broker_is_reported_once_and_stop_ends_the_run() -> None:
 
     port = closed_port()
     subscriber = MqttSubscriber(
-        host="127.0.0.1", port=port, topic="healer-test/solutions", client_id="healer-test"
+        host="127.0.0.1", port=port, topics=("healer-test/solutions",), client_id="healer-test"
     )
     thread = threading.Thread(target=subscriber.run, args=(lambda _: None, on_status))
     thread.start()

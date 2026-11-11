@@ -24,6 +24,7 @@ from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, Te
 from healer.domain.solution import Solution
 from healer.pipeline.repair import RepairPipeline
 from healer.services.suggestion_finder import SuggestionFinder
+from tests.conftest import FakeResults
 
 
 def diagnosis(error_type: str, message: str, line: int = 2) -> Diagnosis:
@@ -240,7 +241,10 @@ def build(
         solutions if solutions is not None else FakeSolutions(),
         ledger if ledger is not None else FakeLedger(),
         suggestions=SuggestionFinder(
-            team if team is not None else FakeTeam(), max_distance=0.1, max_matches=3
+            team if team is not None else FakeTeam(),
+            results=FakeResults(),
+            max_distance=0.1,
+            max_matches=3,
         ),
         project="/workspace",
         max_attempts=attempts,
@@ -661,6 +665,10 @@ def test_several_fixes_for_the_same_error_are_tried_the_newest_first() -> None:
         ("laptop-ana", AttemptOutcome.PASSED),
     ]
     assert result.status is RepairStatus.FIXED
+    assert [(a.fix, a.fix_signature) for a in result.attempts] == [
+        (newer.solution.fix_id, KEY_ERROR.signature),
+        (older.solution.fix_id, KEY_ERROR.signature),
+    ]
 
 
 def test_a_suggestion_with_the_patch_that_just_failed_is_not_offered() -> None:

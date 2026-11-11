@@ -17,6 +17,7 @@ x-healer: &healer
     CHROMA_PATH: /data/chroma
     LEDGER_PATH: /data/healer/ledger.sqlite3
     OUTBOX_PATH: /data/healer/outbox.sqlite3
+    RESULTS_PATH: /data/healer/results.sqlite3
     LISTENER_STATUS_PATH: /data/healer/listener.json
   volumes:
     - .:/app

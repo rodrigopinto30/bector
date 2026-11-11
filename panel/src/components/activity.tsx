@@ -4,6 +4,7 @@ import {
   Alert02Icon,
   Bug01Icon,
   CancelCircleIcon,
+  CheckmarkCircle02Icon,
   InboxIcon,
   MinusSignCircleIcon,
   Notification03Icon,
@@ -27,6 +28,7 @@ const LOOKS: Record<ActivityItem["kind"], { icon: IconSvgElement; tint: Tint }> 
   connection: { icon: Wifi01Icon, tint: "sky" },
   ignored: { icon: MinusSignCircleIcon, tint: "butter" },
   rejected: { icon: CancelCircleIcon, tint: "rose" },
+  result: { icon: CheckmarkCircle02Icon, tint: "mint" },
 }
 
 const STATE_WORDS: Record<ActivityItem["state"], string> = {

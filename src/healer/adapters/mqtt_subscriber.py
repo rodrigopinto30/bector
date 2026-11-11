@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 class MqttSubscriber:
-    """Receives with QoS 1 under a fixed client id and without cleaning the session.
+    """Receives the messages of ``topics`` with QoS 1, under a fixed client id and without
+    cleaning the session.
 
     That makes the subscription durable: once this node has subscribed, the broker keeps
     what is published while it is off and delivers it on the next connection. Lost
@@ -30,7 +31,7 @@ class MqttSubscriber:
         *,
         host: str,
         port: int,
-        topic: str,
+        topics: tuple[str, ...],
         client_id: str,
         username: str | None = None,
         password: str | None = None,
@@ -42,7 +43,9 @@ class MqttSubscriber:
     ) -> None:
         self._host = host
         self._port = port
-        self._topic = topic
+        if not topics:
+            raise ValueError("there must be a topic to subscribe to")
+        self._topics = topics
         self._client_id = client_id
         self._username = username
         self._password = password
@@ -57,7 +60,8 @@ class MqttSubscriber:
 
     @property
     def topic(self) -> str:
-        return self._topic
+        """The first topic: the team's."""
+        return self._topics[0]
 
     def run(self, on_message: Callable[[bytes], None], on_status: Callable[[str], None]) -> None:
         def report(status: str) -> None:
@@ -72,11 +76,11 @@ class MqttSubscriber:
                 self._refused = str(reason)
                 self._stopped.set()
                 return
-            client.subscribe(self._topic, qos=1)
+            client.subscribe([(topic, 1) for topic in self._topics])
 
         def subscribed(_c: mqtt.Client, _u: Any, _m: int, reasons: Any, _p: Any) -> None:
             if any(reason.is_failure for reason in reasons):
-                self._refused = f"not allowed to subscribe to {self._topic}"
+                self._refused = f"not allowed to subscribe to {', '.join(self._topics)}"
                 self._stopped.set()
                 return
             report(f"connected to {self._host}:{self._port}")

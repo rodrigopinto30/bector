@@ -15,7 +15,7 @@ export type Check = {
 
 export type ListenerEvent = {
   at: string
-  kind: "connection" | "received" | "ignored" | "rejected"
+  kind: "connection" | "received" | "ignored" | "rejected" | "result"
   text: string
 }
 
@@ -113,6 +113,12 @@ export type TeamFix = {
   fix_id: string
   /** Suggestions kept for the same error. */
   fixes_for_error: number
+  /** Its place among them, in the order healer run tries them. */
+  rank: number
+  /** Nodes where it made the tests pass. */
+  worked: number
+  /** Nodes where it did not. */
+  failed: number
   signature: string
   node: string
   error: string
@@ -140,7 +146,7 @@ export type WaitingFix = {
 
 export type ActivityItem = {
   at: string
-  kind: "incident" | "suggestion" | "waiting" | "connection" | "ignored" | "rejected"
+  kind: "incident" | "suggestion" | "waiting" | "connection" | "ignored" | "rejected" | "result"
   state: CheckState
   title: string
   detail: string

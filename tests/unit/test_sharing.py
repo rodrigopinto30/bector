@@ -10,7 +10,16 @@ from pydantic import ValidationError
 
 from healer.domain.errors import RejectedMessageError
 from healer.domain.patch import FileEdit, Patch
-from healer.domain.sharing import Evidence, SharedSolution, canonical_json, seal, unseal
+from healer.domain.sharing import (
+    Evidence,
+    FixResult,
+    SharedSolution,
+    canonical_json,
+    results_topic,
+    seal,
+    seal_result,
+    unseal,
+)
 
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
 KEY = b"0123456789abcdef-team-key"
@@ -104,10 +113,10 @@ def test_any_change_after_signing_is_rejected(change: Callable[[dict[str, Any]],
         (b"[" * 5_000, "not valid JSON"),
         (b'{"mac": "\\ud800", "solution": {}}', "not valid JSON"),
         (b'{"mac": "ab", "solution": {"error": "\\ud800"}}', "not valid JSON"),
-        (b"[]", "not a signed solution"),
-        (b'{"solution": {}}', "not a signed solution"),
-        (b'{"mac": 1, "solution": {}}', "not a signed solution"),
-        (b'{"mac": "ab", "solution": {}, "extra": 1}', "not a signed solution"),
+        (b"[]", "not a signed fix or result"),
+        (b'{"solution": {}}', "not a signed fix or result"),
+        (b'{"mac": 1, "solution": {}}', "not a signed fix or result"),
+        (b'{"mac": "ab", "solution": {}, "extra": 1}', "not a signed fix or result"),
         (b'{"mac": "\xc3\xb1", "solution": {}}', "forged or altered"),
     ],
 )
@@ -154,3 +163,46 @@ def test_a_fix_is_identified_by_its_error_and_its_edits() -> None:
     other_edits = Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new="None"),))
     assert shared(patch=other_edits).fix_id != fix
     assert shared(signature="def456").fix_id != fix
+
+
+def fix_result(**changes: object) -> FixResult:
+    values: dict[str, object] = {
+        "node": "laptop-eva",
+        "reported_at": NOW,
+        "signature": "abc123",
+        "fix_id": shared().fix_id,
+        "worked": True,
+    }
+    return FixResult.model_validate({**values, **changes})
+
+
+def test_a_result_is_signed_with_its_kind_and_read_back() -> None:
+    message = seal_result(fix_result(), KEY)
+    body = json.loads(message)
+    assert set(body) == {"mac", "result"}
+    signed = canonical_json({"result": body["result"]})
+    assert body["mac"] == hmac.new(KEY, signed, hashlib.sha256).hexdigest()
+    assert unseal(message, KEY, max_bytes=10_000) == fix_result()
+
+
+def test_a_signed_result_cannot_pass_for_a_fix_or_carry_more() -> None:
+    body = json.loads(seal_result(fix_result(), KEY))
+    as_fix = canonical_json({"mac": body["mac"], "solution": body["result"]})
+    with pytest.raises(RejectedMessageError, match="forged or altered"):
+        unseal(as_fix, KEY, max_bytes=10_000)
+    with pytest.raises(RejectedMessageError, match="result has an invalid format"):
+        unseal(seal_result_body({**body["result"], "patch": "x"}), KEY, max_bytes=10_000)
+
+
+def seal_result_body(body: dict[str, Any]) -> bytes:
+    mac = hmac.new(KEY, canonical_json({"result": body}), hashlib.sha256).hexdigest()
+    return canonical_json({"mac": mac, "result": body})
+
+
+def test_a_result_names_a_fix_by_its_id() -> None:
+    with pytest.raises(ValidationError):
+        fix_result(fix_id="not-a-fix-id")
+
+
+def test_results_travel_beside_the_team_topic() -> None:
+    assert results_topic("healer/solutions/v1") == "healer/solutions/v1/results"

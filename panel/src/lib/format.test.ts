@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest"
 
 import { axisFormat, axisTicks, busiestDay, dayRows, resolutionParts } from "@/lib/charts"
 import {
+  fixResults,
   formatCount,
   formatDay,
   formatMoment,
+  ordinal,
   percent,
   projectName,
   shortSignature,
@@ -96,6 +98,29 @@ describe("charts", () => {
       "4,000",
       "6,000",
       "8,000",
+    ])
+  })
+})
+
+describe("team results", () => {
+  it("leave a zero out", () => {
+    expect(fixResults(2, 1)).toBe("worked on 2 nodes, failed on 1 node")
+    expect(fixResults(1, 0)).toBe("worked on 1 node")
+    expect(fixResults(0, 3)).toBe("failed on 3 nodes")
+  })
+
+  it("say each place in the order", () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 111].map(ordinal)).toEqual([
+      "1st",
+      "2nd",
+      "3rd",
+      "4th",
+      "11th",
+      "12th",
+      "13th",
+      "21st",
+      "22nd",
+      "111th",
     ])
   })
 })

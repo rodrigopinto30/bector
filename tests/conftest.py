@@ -1,5 +1,6 @@
 import hashlib
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,8 @@ import pytest
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 
 from healer.domain.models import SourceFile
+from healer.domain.ranking import Tally
+from healer.domain.sharing import FixResult
 
 
 class FakeEmbeddingFunction(EmbeddingFunction[Documents]):
@@ -40,6 +43,34 @@ class FakeEmbeddingFunction(EmbeddingFunction[Documents]):
         return FakeEmbeddingFunction()
 
 
+class FakeResults:
+    """``ResultStore`` in memory: one vote per node and fix, its latest."""
+
+    def __init__(self, *results: FixResult) -> None:
+        self.votes: dict[tuple[str, str], FixResult] = {}
+        for result in results:
+            self.record(result)
+
+    def record(self, result: FixResult) -> bool:
+        key = (result.fix_id, result.node)
+        known = self.votes.get(key)
+        if known is not None and known.reported_at >= result.reported_at:
+            return False
+        self.votes[key] = result
+        return known is None or known.worked != result.worked
+
+    def tally(self, fix_ids: Iterable[str]) -> dict[str, Tally]:
+        wanted = set(fix_ids)
+        tallies: dict[str, Tally] = {}
+        for (fix, _), result in self.votes.items():
+            if fix in wanted:
+                tally = tallies.get(fix, Tally())
+                tallies[fix] = Tally(
+                    worked=tally.worked + result.worked, failed=tally.failed + (not result.worked)
+                )
+        return tallies
+
+
 @pytest.fixture(autouse=True)
 def isolated_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Every test gets its own ledger, so none can write to the real one."""
@@ -53,6 +84,14 @@ def isolated_outbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Every test gets its own outbox, so none can send or drop the real waiting fixes."""
     path = tmp_path / "outbox.sqlite3"
     monkeypatch.setenv("OUTBOX_PATH", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own results of the team's fixes, so none changes the real ones."""
+    path = tmp_path / "results.sqlite3"
+    monkeypatch.setenv("RESULTS_PATH", str(path))
     return path
 
 

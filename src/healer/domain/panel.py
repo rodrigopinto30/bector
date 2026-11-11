@@ -1,8 +1,7 @@
 """What the local panel shows: a read-only picture of this node, ready to be drawn."""
 
 import difflib
-from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -13,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from healer.domain.ledger import LedgerEntry, LedgerSummary, Resolution, total
 from healer.domain.listener import STALE_AFTER, ListenerStatus
 from healer.domain.patch import FileEdit, Patch
+from healer.domain.ranking import NO_RESULTS, Tally, ranked
 from healer.domain.repair import RepairStatus
 from healer.domain.sharing import PendingShare, ReceivedSolution
 from healer.domain.solution import Solution
@@ -136,6 +136,9 @@ class TeamFixView(BaseModel):
 
     fix_id: str = Field(description="One per fix; an error may have several (ADR 0021).")
     fixes_for_error: int = Field(ge=1, description="Suggestions kept for the same error.")
+    rank: int = Field(ge=1, description="Its place among them, in the order healer run tries them.")
+    worked: int = Field(ge=0, description="Nodes where it made the tests pass (ADR 0022).")
+    failed: int = Field(ge=0, description="Nodes where it did not.")
     signature: str
     node: str
     error: str
@@ -171,7 +174,9 @@ class ActivityItem(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     at: datetime
-    kind: Literal["incident", "suggestion", "waiting", "connection", "ignored", "rejected"]
+    kind: Literal[
+        "incident", "suggestion", "waiting", "connection", "ignored", "rejected", "result"
+    ]
     state: CheckState
     title: str
     detail: str
@@ -293,20 +298,45 @@ def fix_view(solution: Solution) -> FixView:
     )
 
 
-def team_fix_views(suggestions: list[ReceivedSolution]) -> list[TeamFixView]:
-    """Each suggestion, in the same order, with how many the team gave for its error."""
-    counts = Counter(received.solution.signature for received in suggestions)
+def team_fix_views(
+    suggestions: list[ReceivedSolution], tallies: Mapping[str, Tally] | None = None
+) -> list[TeamFixView]:
+    """Each suggestion, in the same order, with its results, how many the team gave for
+    its error, and its place among them in the order ``healer run`` tries them."""
+    tallies = tallies or {}
+    by_error: dict[str, list[ReceivedSolution]] = {}
+    for received in suggestions:
+        by_error.setdefault(received.solution.signature, []).append(received)
+    rank = {
+        fix.solution.fix_id: place
+        for fixes in by_error.values()
+        for place, fix in enumerate(ranked(fixes, tallies), start=1)
+    }
     return [
-        team_fix_view(received, fixes_for_error=counts[received.solution.signature])
+        team_fix_view(
+            received,
+            fixes_for_error=len(by_error[received.solution.signature]),
+            rank=rank[received.solution.fix_id],
+            tally=tallies.get(received.solution.fix_id, NO_RESULTS),
+        )
         for received in suggestions
     ]
 
 
-def team_fix_view(received: ReceivedSolution, *, fixes_for_error: int = 1) -> TeamFixView:
+def team_fix_view(
+    received: ReceivedSolution,
+    *,
+    fixes_for_error: int = 1,
+    rank: int = 1,
+    tally: Tally = NO_RESULTS,
+) -> TeamFixView:
     solution = received.solution
     return TeamFixView(
         fix_id=solution.fix_id,
         fixes_for_error=fixes_for_error,
+        rank=rank,
+        worked=tally.worked,
+        failed=tally.failed,
         signature=solution.signature,
         node=solution.node,
         error=solution.error,
@@ -404,6 +434,7 @@ _SOLVED_BY = {
 _LISTENER_EVENTS: dict[str, tuple[str, CheckState]] = {
     "ignored": ("Message ignored", CheckState.OFF),
     "rejected": ("Message rejected", CheckState.FAIL),
+    "result": ("Result received", CheckState.OK),
 }
 
 

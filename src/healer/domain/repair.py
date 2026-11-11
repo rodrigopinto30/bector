@@ -39,6 +39,10 @@ class Attempt(BaseModel):
         default=0, ge=0, description="For a reused solution, the tokens it cost originally."
     )
     origin: str = Field(default="", description="The node a team suggestion came from.")
+    fix: str = Field(default="", description="The fix id of a team suggestion (ADR 0021).")
+    fix_signature: str = Field(
+        default="", description="The error signature a team suggestion was found for."
+    )
     report: RunReport | None = Field(
         default=None, description="The test run with the patch; None when it was not run."
     )

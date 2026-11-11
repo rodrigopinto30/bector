@@ -251,6 +251,8 @@ class RepairPipeline:
                 source=AttemptSource.TEAM,
                 saved_tokens=min(solution.tokens_spent, self._max_tokens),
                 origin=solution.node,
+                fix=solution.fix_id,
+                fix_signature=solution.signature,
             )
             if "status" in update:
                 break
@@ -313,6 +315,8 @@ class RepairPipeline:
         source: AttemptSource = AttemptSource.MODEL,
         saved_tokens: int = 0,
         origin: str = "",
+        fix: str = "",
+        fix_signature: str = "",
     ) -> RepairState:
         """Test ``proposal`` on a fresh copy and record the attempt."""
         attempts = state["attempts"]
@@ -329,6 +333,8 @@ class RepairPipeline:
                 source=source,
                 saved_tokens=saved_tokens,
                 origin=origin,
+                fix=fix,
+                fix_signature=fix_signature,
             )
 
         try:
@@ -352,6 +358,8 @@ class RepairPipeline:
         source: AttemptSource = AttemptSource.MODEL,
         saved_tokens: int = 0,
         origin: str = "",
+        fix: str = "",
+        fix_signature: str = "",
     ) -> RepairState:
         attempt = Attempt(
             number=len(attempts) + 1,
@@ -360,6 +368,8 @@ class RepairPipeline:
             source=source,
             saved_tokens=saved_tokens,
             origin=origin,
+            fix=fix,
+            fix_signature=fix_signature,
             report=report,
             problem=problem,
         )

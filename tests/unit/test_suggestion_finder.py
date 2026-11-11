@@ -2,8 +2,15 @@ from datetime import UTC, datetime
 
 from healer.domain.diagnosis import Diagnosis, TracedError
 from healer.domain.patch import FileEdit, Patch
-from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, TeamMatch
+from healer.domain.sharing import (
+    Evidence,
+    FixResult,
+    ReceivedSolution,
+    SharedSolution,
+    TeamMatch,
+)
 from healer.services.suggestion_finder import SuggestionFinder
+from tests.conftest import FakeResults
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 SIGNATURE = "a" * 64
@@ -54,8 +61,39 @@ class FakeStore:
         return list(self.nearby)[:limit]
 
 
-def finder(store: FakeStore, max_matches: int = 3) -> SuggestionFinder:
-    return SuggestionFinder(store, max_distance=0.1, max_matches=max_matches)  # type: ignore[arg-type]
+def finder(
+    store: FakeStore, max_matches: int = 3, results: FakeResults | None = None
+) -> SuggestionFinder:
+    return SuggestionFinder(
+        store,  # type: ignore[arg-type]
+        results=results if results is not None else FakeResults(),
+        max_distance=0.1,
+        max_matches=max_matches,
+    )
+
+
+def vote(received: ReceivedSolution, node: str, *, worked: bool) -> FixResult:
+    solution = received.solution
+    return FixResult(
+        node=node,
+        reported_at=NOW,
+        signature=solution.signature,
+        fix_id=solution.fix_id,
+        worked=worked,
+    )
+
+
+def test_fixes_for_the_same_error_that_worked_elsewhere_come_first() -> None:
+    newest = received(SIGNATURE, new="newest", node="laptop-eva")
+    proven = received(SIGNATURE, new="proven")
+    results = FakeResults(
+        vote(proven, "laptop-sol", worked=True),
+        vote(proven, "laptop-max", worked=True),
+        vote(newest, "laptop-sol", worked=False),
+    )
+    matches = finder(FakeStore((newest, proven)), results=results).find(TARGET)
+    assert [m.received for m in matches] == [proven, newest]
+    assert [(m.worked, m.failed) for m in matches] == [(2, 0), (0, 1)]
 
 
 def near(signature: str, distance: float = 0.05, error: str = "KeyError: 'db'") -> TeamMatch:

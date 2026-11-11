@@ -60,7 +60,7 @@ def test_a_message_travels_over_tls() -> None:
     subscriber = MqttSubscriber(
         host=HOST,
         port=TLS_PORT,
-        topic=topic,
+        topics=(topic,),
         client_id=f"healer-test-{uuid.uuid4().hex}",
         username=USERNAME,
         password=PASSWORD,

@@ -8,7 +8,7 @@ from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.domain.errors import SharingError
 from healer.domain.patch import FileEdit, Patch
 from healer.domain.redaction import Redactor
-from healer.domain.sharing import unseal
+from healer.domain.sharing import FixResult, unseal
 from healer.domain.solution import Solution
 from healer.services.solution_sharer import SolutionSharer
 
@@ -53,6 +53,7 @@ def sharer(
     max_bytes: int = 10_000,
     outbox: SqliteOutbox | None = None,
     now: datetime = NOW,
+    results: FakePublisher | None = None,
 ) -> SolutionSharer:
     return SolutionSharer(
         publisher,
@@ -61,7 +62,14 @@ def sharer(
         key=key,
         max_bytes=max_bytes,
         outbox=outbox,
+        results_publisher=results,
         clock=lambda: now,
+    )
+
+
+def fix_result(fix: str = "f" * 64, *, worked: bool = True, at: datetime = NOW) -> FixResult:
+    return FixResult(
+        node="laptop-ana", reported_at=at, signature="abc123", fix_id=fix, worked=worked
     )
 
 
@@ -190,13 +198,57 @@ def test_resend_signs_with_the_current_team_key(outbox: SqliteOutbox) -> None:
     assert unseal(up.messages[0], new_key, max_bytes=10_000).signature == "abc123"
 
 
-def test_a_delivered_fix_drops_an_older_one_waiting_for_the_same_error(
+def test_a_delivered_fix_drops_its_copy_waiting_but_not_other_fixes(
     outbox: SqliteOutbox,
 ) -> None:
-    sharer(FakePublisher(fail=True), outbox=outbox).share(solution())
+    down = FakePublisher(fail=True)
+    sharer(down, outbox=outbox).share(solution())
+    other = Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new="None"),))
+    sharer(down, outbox=outbox).share(solution(patch=other))
     later = sharer(FakePublisher(), outbox=outbox, now=NOW + timedelta(minutes=5))
     later.share(solution(explanation="A better default."))
-    assert outbox.pending() == []
+    assert [entry.solution.patch for entry in outbox.pending()] == [other]
+
+
+def test_a_result_is_sent_to_the_results_topic_signed() -> None:
+    fixes, results = FakePublisher(), FakePublisher(topic=f"{TOPIC}/results")
+    receipt = sharer(fixes, results=results).report(fix_result())
+    assert receipt.delivered
+    assert fixes.messages == []
+    assert unseal(results.messages[0], KEY, max_bytes=10_000) == fix_result()
+
+
+def test_a_result_the_broker_does_not_take_waits_and_is_resent(outbox: SqliteOutbox) -> None:
+    down = FakePublisher(fail=True)
+    receipt = sharer(down, outbox=outbox, results=down).report(fix_result())
+    assert receipt.failure == DOWN
+    [waiting] = outbox.pending_results()
+    assert (waiting.topic, waiting.result) == (TOPIC, fix_result())
+
+    report = sharer(down, outbox=outbox, results=down).resend()
+    assert (report.results_sent, report.results_left, report.error) == (0, 1, DOWN)
+    assert outbox.pending_results()[0].attempts == 2
+
+    up = FakePublisher()
+    report = sharer(up, outbox=outbox, results=up).resend()
+    assert (report.results_sent, report.results_left) == (1, 0)
+    assert outbox.pending_results() == []
+
+
+def test_a_delivered_result_drops_an_older_one_waiting_for_the_same_fix(
+    outbox: SqliteOutbox,
+) -> None:
+    down = FakePublisher(fail=True)
+    sharer(down, outbox=outbox, results=down).report(fix_result(worked=False))
+    up = FakePublisher()
+    later = fix_result(at=NOW + timedelta(minutes=5))
+    sharer(up, outbox=outbox, results=up).report(later)
+    assert outbox.pending_results() == []
+
+
+def test_results_cannot_be_sent_without_a_publisher_for_them() -> None:
+    with pytest.raises(SharingError, match="no publisher for them"):
+        sharer(FakePublisher()).report(fix_result())
 
 
 def test_an_entry_over_the_size_limit_is_dropped(outbox: SqliteOutbox) -> None:
@@ -216,3 +268,17 @@ def test_a_fix_that_cannot_be_kept_either_is_reported(tmp_path: Path) -> None:
 
 def test_resend_without_an_outbox_does_nothing() -> None:
     assert sharer(FakePublisher()).resend().sent == 0
+
+
+def test_without_an_outbox_a_result_the_broker_refuses_reaches_the_caller() -> None:
+    down = FakePublisher(fail=True)
+    with pytest.raises(SharingError, match="could not be reached"):
+        sharer(down, results=down).report(fix_result())
+
+
+def test_a_result_that_cannot_be_kept_either_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "file").write_text("")
+    blocked = SqliteOutbox(tmp_path / "file" / "outbox.sqlite3")
+    down = FakePublisher(fail=True)
+    with pytest.raises(SharingError, match="could not be kept to send later"):
+        sharer(down, outbox=blocked, results=down).report(fix_result())
