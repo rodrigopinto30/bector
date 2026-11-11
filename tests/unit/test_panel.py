@@ -21,6 +21,7 @@ from healer.domain.panel import (
 )
 from healer.domain.patch import FileEdit, Patch
 from healer.domain.proposal import TokenUsage
+from healer.domain.ranking import Tally
 from healer.domain.repair import RepairStatus
 from healer.domain.sharing import Evidence, PendingShare, ReceivedSolution, SharedSolution
 from healer.domain.solution import Solution
@@ -283,3 +284,25 @@ def test_each_team_fix_has_its_own_id_and_the_count_for_its_error() -> None:
     ]
     assert len({v.fix_id for v in views}) == 3
     assert views[0].fix_id == suggestions[0].solution.fix_id
+
+
+def test_team_fixes_carry_their_results_and_their_place_for_their_error() -> None:
+    newest = team_suggestion("a" * 64, "y", node="laptop-eva")
+    proven = team_suggestion("a" * 64, "z")
+    tallies = {proven.solution.fix_id: Tally(worked=2), newest.solution.fix_id: Tally(failed=1)}
+    views = team_fix_views([newest, proven], tallies)
+    assert [(v.node, v.rank, v.worked, v.failed) for v in views] == [
+        ("laptop-eva", 2, 0, 1),
+        ("laptop-ana", 1, 2, 0),
+    ]
+    activity_item = activity(
+        incidents=[],
+        team=[],
+        outbox=[],
+        listener=listener(
+            recent=[ListenerEvent(at=NOW, kind="result", text="laptop-sol: it worked there")]
+        ),
+    )
+    assert [(i.kind, i.title, i.detail) for i in activity_item] == [
+        ("result", "Result received", "laptop-sol: it worked there")
+    ]

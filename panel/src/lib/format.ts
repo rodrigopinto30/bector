@@ -92,3 +92,22 @@ export const STATUS_LABELS: Record<RepairStatus, string> = {
   out_of_budget: "Out of budget",
   stopped: "Stopped",
 }
+
+function nodes(count: number): string {
+  return count === 1 ? "1 node" : `${count} nodes`
+}
+
+/** For example "worked on 2 nodes, failed on 1 node", leaving out a zero. */
+export function fixResults(worked: number, failed: number): string {
+  return [worked && `worked on ${nodes(worked)}`, failed && `failed on ${nodes(failed)}`]
+    .filter(Boolean)
+    .join(", ")
+}
+
+/** 1st, 2nd, 3rd, 4th, ..., 11th, 12th, 13th, 21st. */
+export function ordinal(place: number): string {
+  const tens = place % 100
+  const suffix =
+    tens >= 11 && tens <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[place % 10] ?? "th")
+  return `${place}${suffix}`
+}

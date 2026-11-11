@@ -487,6 +487,9 @@
     {
       "fix_id": "906171e7a48ef99e7fab3141c38dee9291d229f3af02a69f935e0d5341935315",
       "fixes_for_error": 2,
+      "rank": 2,
+      "worked": 0,
+      "failed": 1,
       "signature": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "node": "laptop-eva",
       "error": "ZeroDivisionError: division by zero in average (billing/totals.py)",
@@ -521,6 +524,9 @@
     {
       "fix_id": "e0caf94183186ba848a27d1b7fd312b9fba0bccfec3ab0d8352214e86dcae993",
       "fixes_for_error": 2,
+      "rank": 1,
+      "worked": 2,
+      "failed": 0,
       "signature": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "node": "laptop-ana",
       "error": "ZeroDivisionError: division by zero in average (billing/totals.py)",
@@ -612,6 +618,13 @@
       "detail": "the signature does not match: forged or altered message"
     },
     {
+      "at": "2026-11-09T14:05:00Z",
+      "kind": "result",
+      "state": "ok",
+      "title": "Result received",
+      "detail": "laptop-sol: the fix from laptop-ana for ZeroDivisionError: division by zero in average (billing/totals.py) worked there"
+    },
+    {
       "at": "2026-11-09T14:00:00Z",
       "kind": "incident",
       "state": "ok",
@@ -680,13 +693,6 @@
       "state": "ok",
       "title": "AttributeError fixed in shop",
       "detail": "by Claude, 15,200 tokens spent"
-    },
-    {
-      "at": "2026-11-05T10:01:00Z",
-      "kind": "suggestion",
-      "state": "ok",
-      "title": "Fix received from laptop-eva",
-      "detail": "ZeroDivisionError: division by zero in average (billing/totals.py)"
     }
   ],
   "problems": {}

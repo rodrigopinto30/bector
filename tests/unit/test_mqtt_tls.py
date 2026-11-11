@@ -86,7 +86,7 @@ def test_the_listener_stops_when_the_first_handshake_fails() -> None:
         subscriber = MqttSubscriber(
             host="127.0.0.1",
             port=port,
-            topic="healer-test/solutions",
+            topics=("healer-test/solutions",),
             client_id="healer-test",
             tls=True,
         )

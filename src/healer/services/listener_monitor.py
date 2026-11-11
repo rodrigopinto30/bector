@@ -15,7 +15,7 @@ from healer.domain.listener import (
 )
 from healer.domain.ports import ListenerStatusStore
 
-Outcome = Literal["received", "ignored", "rejected"]
+Outcome = Literal["received", "ignored", "rejected", "result"]
 
 
 class ListenerMonitor:
@@ -73,12 +73,14 @@ class ListenerMonitor:
         self._save()
 
     def count(self, outcome: Outcome, text: str = "") -> None:
-        """Count a message, and keep what it was among the recent events."""
+        """Count a message, and keep what it was among the recent events. A result counted
+        is a message received, kept as an event of its own kind."""
         event = ListenerEvent(at=self._clock(), kind=outcome, text=text[:EVENT_TEXT_CHARS])
+        field = "received" if outcome == "result" else outcome
         with self._lock:
-            current: int = getattr(self._status, outcome)
+            current: int = getattr(self._status, field)
             self._status = self._status.model_copy(
-                update={outcome: current + 1, "recent": self._with(event)}
+                update={field: current + 1, "recent": self._with(event)}
             )
         self._save()
 

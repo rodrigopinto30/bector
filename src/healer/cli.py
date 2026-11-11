@@ -21,6 +21,7 @@ from healer.domain.execution import RunReport
 from healer.domain.ledger import LedgerSummary, summarize, total
 from healer.domain.patch import AppliedPatch, Patch, parse_patch
 from healer.domain.proposal import SYSTEM_PROMPT, TokenUsage, render_request
+from healer.domain.ranking import results_of
 from healer.domain.redaction import Redactor
 from healer.domain.repair import (
     Attempt,
@@ -33,8 +34,11 @@ from healer.domain.sharing import (
     MIN_KEY_LENGTH,
     Ingested,
     IngestOutcome,
+    PendingResult,
     PendingShare,
     ResendReport,
+    ResultIngested,
+    ResultOutcome,
     TeamMatch,
 )
 from healer.domain.solution import Solution
@@ -49,6 +53,7 @@ from healer.factory import (
     build_panel_app,
     build_publisher,
     build_repair_pipeline,
+    build_results,
     build_sandbox_client,
     build_sandbox_runner,
     build_solution_ingester,
@@ -107,16 +112,14 @@ def doctor() -> None:
     else:
         typer.echo(f"[ok]   sharing: on, as node {settings.node_id} on {settings.mqtt_topic}")
     try:
-        waiting = len(build_outbox(settings).pending())
+        store = build_outbox(settings)
+        waiting = _waiting(len(store.pending()), len(store.pending_results()))
     except HealerError as exc:
         failed = True
         typer.echo(f"[fail] outbox: {exc}")
     else:
         if waiting:
-            typer.echo(
-                f"[info] outbox: {_plural(waiting, 'fix', 'fixes')} waiting to be sent; "
-                "'healer outbox' lists them"
-            )
+            typer.echo(f"[info] outbox: {waiting} waiting to be sent; 'healer outbox' lists them")
     raise typer.Exit(code=1 if failed else 0)
 
 
@@ -518,7 +521,9 @@ def run(
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    sharing = settings.share_solutions if share is None else share
     fix = _report_repair(result, save)
+    _tell_results(settings, result, enabled=sharing)
     if fix is None or fix.report is None or fix.report.patch is None:
         return
     from_team = fix.source is AttemptSource.TEAM
@@ -533,9 +538,7 @@ def run(
         saved=save,
     )
     if applied and result.solution is not None:
-        _share(
-            settings, result.solution, enabled=settings.share_solutions if share is None else share
-        )
+        _share(settings, result.solution, enabled=sharing)
 
 
 def _approve_suggestion(match: TeamMatch, *, isolated: bool) -> bool:
@@ -555,6 +558,8 @@ def _approve_suggestion(match: TeamMatch, *, isolated: bool) -> bool:
     )
     match_kind = "same signature" if match.same_signature else "similar error"
     typer.echo(f"fixes      {_printable(solution.error)} ({match_kind})")
+    if match.worked or match.failed:
+        typer.echo(f"results    {_results(match.worked, match.failed)}")
     typer.echo(f"proposal   {_printable(solution.explanation)}")
     if isolated:
         typer.echo("sandbox    testing it in the test sandbox, with no network, secrets or files")
@@ -759,9 +764,65 @@ def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
         typer.echo(f"warning: the fixes waiting in the outbox were not sent: {exc}", err=True)
 
 
+def _tell_results(settings: Settings, result: RepairResult, *, enabled: bool) -> None:
+    """Keep what this run learned about the team's fixes, and tell the team with sharing
+    on (ADR 0022). A result says which fix worked or failed here, never code. A failure is
+    reported and changes nothing else."""
+    found = results_of(result.attempts, node=settings.node_id, at=datetime.now(UTC))
+    if not found:
+        return
+    origins = {attempt.fix: attempt.origin for attempt in result.attempts if attempt.fix}
+    try:
+        store = build_results(settings)
+        for item in found:
+            store.record(item)
+    except HealerError as exc:
+        typer.echo(f"warning: the results of the team's fixes were not kept: {exc}", err=True)
+    sharer: SolutionSharer | None = None
+    if enabled:
+        try:
+            sharer = build_solution_sharer(settings)
+        except HealerError as exc:
+            typer.echo(f"warning: the team was not told the results: {exc}", err=True)
+    for item in found:
+        line = (
+            f"result     the fix from {_printable(origins[item.fix_id])} "
+            f"{'worked' if item.worked else 'failed'} here"
+        )
+        if sharer is None:
+            typer.echo(line)
+            continue
+        try:
+            receipt = sharer.report(item)
+        except HealerError as exc:
+            typer.echo(line)
+            typer.echo(f"warning: the team was not told this result: {exc}", err=True)
+            continue
+        told = "the team was told" if receipt.delivered else "it waits in the outbox"
+        typer.echo(f"{line}; {told}")
+
+
+def _results(worked: int, failed: int) -> str:
+    """For example ``worked on 2 nodes, failed on 1 node``, leaving out a zero."""
+    parts = [f"worked on {_plural(worked, 'node')}"] if worked else []
+    if failed:
+        parts.append(f"failed on {_plural(failed, 'node')}")
+    return ", ".join(parts)
+
+
+def _waiting(fixes: int, results: int) -> str:
+    """For example ``1 fix and 2 results``; empty when nothing waits."""
+    parts = [_plural(fixes, "fix", "fixes")] if fixes else []
+    if results:
+        parts.append(_plural(results, "result"))
+    return " and ".join(parts)
+
+
 def _echo_resend(report: ResendReport) -> None:
     if report.sent:
         typer.echo(f"resent     {_plural(report.sent, 'fix', 'fixes')} waiting in the outbox")
+    if report.results_sent:
+        typer.echo(f"resent     {_plural(report.results_sent, 'result')} waiting in the outbox")
     if report.dropped:
         typer.echo(
             f"dropped    {_plural(report.dropped, 'fix', 'fixes')} over MAX_SHARE_BYTES, "
@@ -769,8 +830,8 @@ def _echo_resend(report: ResendReport) -> None:
         )
     if report.error is not None:
         typer.echo(
-            f"waiting    {_plural(report.left, 'fix', 'fixes')} still in the outbox: "
-            f"{_printable(report.error)}"
+            f"waiting    {_waiting(report.left, report.results_left) or 'nothing'} still in "
+            f"the outbox: {_printable(report.error)}"
         )
 
 
@@ -1042,9 +1103,14 @@ def listen() -> None:
         except HealerError as exc:
             typer.echo(f"warning: a valid message could not be stored: {exc}", err=True)
         else:
-            kept = ingested.outcome in (IngestOutcome.NEW, IngestOutcome.REPLACED)
-            line = _ingested_line(ingested)
-            monitor.count("received" if kept else "ignored", line.split(maxsplit=1)[1])
+            if isinstance(ingested, ResultIngested):
+                counted = ingested.outcome is ResultOutcome.COUNTED
+                line = _result_line(ingested)
+                monitor.count("result" if counted else "ignored", line.split(maxsplit=1)[1])
+            else:
+                kept = ingested.outcome in (IngestOutcome.NEW, IngestOutcome.REPLACED)
+                line = _ingested_line(ingested)
+                monitor.count("received" if kept else "ignored", line.split(maxsplit=1)[1])
             typer.echo(line)
 
     def on_status(status: str) -> None:
@@ -1128,11 +1194,27 @@ def _ingested_line(ingested: Ingested) -> str:
     if ingested.outcome is IngestOutcome.NEW:
         return f"received   {summary}, kept as a suggestion"
     if ingested.outcome is IngestOutcome.REPLACED:
-        return f"received   {summary}, kept; the oldest suggestion for this error made room"
+        return f"received   {summary}, kept; the one ranked last for this error made room"
     if ingested.outcome is IngestOutcome.DUPLICATE:
         return f"ignored    {summary}: already known"
-    if ingested.outcome is IngestOutcome.OLDER:
-        return f"ignored    {summary}: older than every suggestion kept for this error"
+    if ingested.outcome is IngestOutcome.OUTRANKED:
+        return f"ignored    {summary}: ranks below every suggestion kept for this error"
+    return "ignored    sent by this node"
+
+
+def _result_line(ingested: ResultIngested) -> str:
+    result = ingested.result
+    node = _printable(result.node)
+    fix = ingested.fix
+    if ingested.outcome is ResultOutcome.COUNTED and fix is not None:
+        return (
+            f"result     {node}: the fix from {_printable(fix.node)} for "
+            f"{_printable(fix.error)} {'worked' if result.worked else 'failed'} there"
+        )
+    if ingested.outcome is ResultOutcome.KNOWN:
+        return f"ignored    result from {node}: already known"
+    if ingested.outcome is ResultOutcome.UNKNOWN:
+        return f"ignored    result from {node}: about a fix not kept here"
     return "ignored    sent by this node"
 
 
@@ -1150,7 +1232,8 @@ def outbox(
         bool, typer.Option("--discard", help="Forget them: the team will not receive them")
     ] = False,
 ) -> None:
-    """Show this node's accepted fixes that the broker did not take, which wait to be sent.
+    """Show this node's accepted fixes, and the results of the team's fixes tested here,
+    that the broker did not take and wait to be sent.
 
     'healer listen' sends them right after connecting and every OUTBOX_RETRY_SECONDS, and
     'healer run' once its next fix is delivered. Each one only goes to the topic it was
@@ -1163,21 +1246,23 @@ def outbox(
     try:
         store = build_outbox(settings)
         waiting = store.pending()
+        results = store.pending_results()
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
-    if not waiting:
-        typer.echo("no fixes waiting; every shared fix reached the broker")
+    if not waiting and not results:
+        typer.echo("nothing waiting; every shared fix and result reached the broker")
         return
-    count = _plural(len(waiting), "fix", "fixes")
+    count = _waiting(len(waiting), len(results))
     if discard:
         if not _confirm(f"discard {count}? The team will not receive them"):
             typer.echo("kept       nothing was discarded")
             return
-        typer.echo(f"discarded  {_plural(store.clear(), 'fix', 'fixes')}")
+        store.clear()
+        typer.echo(f"discarded  {count}")
         return
     if send:
-        _send_outbox(settings, waiting)
+        _send_outbox(settings, waiting, results)
         return
     typer.echo(f"{count} waiting to be sent, oldest first")
     for entry in waiting:
@@ -1192,13 +1277,31 @@ def outbox(
         typer.echo(
             f"tried      {_plural(entry.attempts, 'time')}, last: {_printable(entry.last_error)}"
         )
+    for pending in results:
+        result = pending.result
+        topic = "" if pending.topic == settings.mqtt_topic else " (not the current MQTT_TOPIC)"
+        typer.echo("")
+        typer.echo(
+            f"{result.reported_at:%Y-%m-%d %H:%M} UTC  result for {_printable(pending.topic)}"
+            f"{topic}"
+        )
+        typer.echo(
+            f"result     fix {result.fix_id[:12]} {'worked' if result.worked else 'failed'} "
+            f"here (error {result.signature[:12]})"
+        )
+        typer.echo(
+            f"tried      {_plural(pending.attempts, 'time')}, last: "
+            f"{_printable(pending.last_error)}"
+        )
 
 
-def _send_outbox(settings: Settings, waiting: list[PendingShare]) -> None:
+def _send_outbox(
+    settings: Settings, waiting: list[PendingShare], results: list[PendingResult]
+) -> None:
     try:
         sharer = build_solution_sharer(settings)
         typer.echo(
-            f"sending    the fixes waiting for {settings.mqtt_topic} through "
+            f"sending    what waits for {settings.mqtt_topic} through "
             f"{settings.mqtt_host}:{settings.mqtt_port}..."
         )
         report = sharer.resend()
@@ -1206,11 +1309,13 @@ def _send_outbox(settings: Settings, waiting: list[PendingShare]) -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     _echo_resend(report)
-    elsewhere = sum(entry.topic != settings.mqtt_topic for entry in waiting)
+    elsewhere = _waiting(
+        sum(entry.topic != settings.mqtt_topic for entry in waiting),
+        sum(entry.topic != settings.mqtt_topic for entry in results),
+    )
     if elsewhere:
         typer.echo(
-            f"kept       {_plural(elsewhere, 'fix', 'fixes')} for another topic, "
-            "sent only when MQTT_TOPIC is that one again"
+            f"kept       {elsewhere} for another topic, sent only when MQTT_TOPIC is that one again"
         )
     if report.error is not None:
         raise typer.Exit(code=1)
@@ -1219,8 +1324,10 @@ def _send_outbox(settings: Settings, waiting: list[PendingShare]) -> None:
 @app.command()
 def team() -> None:
     """Show the fixes received from the team. 'healer run' offers them; none is applied alone."""
+    settings = Settings()
     try:
-        suggestions = build_team_solutions(Settings()).all()
+        suggestions = build_team_solutions(settings).all()
+        tallies = build_results(settings).tally(r.solution.fix_id for r in suggestions)
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
@@ -1239,6 +1346,9 @@ def team() -> None:
         typer.echo(f"error      {_printable(solution.error)}")
         typer.echo(f"files      {_printable(', '.join(solution.patch.files))}")
         typer.echo(f"evidence   {_printable(solution.evidence.command)}")
+        tally = tallies.get(solution.fix_id)
+        if tally is not None:
+            typer.echo(f"results    {_results(tally.worked, tally.failed)}")
 
 
 @app.command()

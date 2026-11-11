@@ -4,6 +4,7 @@ project   write the demo project, with its first bug, to /demo/project
 teammate  a teammate, laptop-ana, shares the fix for the first bug, signed with the team key
 rival     another teammate, laptop-eva, shares a different fix for that bug, which these
           tests reject
+result    a third teammate, laptop-sol, tells the team that laptop-ana's fix worked there
 forged    someone without the team key sends a fix
 share     this node keeps its own fix for a second bug, as healer run does after Claude
           finds one, and shares it with the team
@@ -18,7 +19,15 @@ from pathlib import Path
 from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.patch import FileEdit, Patch
-from healer.domain.sharing import Evidence, SharedSolution, seal
+from healer.domain.sharing import (
+    Evidence,
+    FixResult,
+    SharedSolution,
+    fix_id,
+    results_topic,
+    seal,
+    seal_result,
+)
 from healer.domain.solution import Solution
 from healer.factory import (
     build_publisher,
@@ -120,6 +129,14 @@ def teammate_fix(
     )
 
 
+def first_bug(settings: Settings) -> str:
+    """The signature of the first bug, worked out on a copy that still has it."""
+    with tempfile.TemporaryDirectory(dir=PROJECT.parent) as folder:
+        copy = Path(folder)
+        write(copy, FILES)
+        return diagnose(copy, settings, "KeyError").signature
+
+
 def own_fix(settings: Settings) -> Solution:
     """The fix for the second bug, worked out on a copy that has it."""
     with tempfile.TemporaryDirectory(dir=PROJECT.parent) as folder:
@@ -158,6 +175,17 @@ def main(command: str) -> None:
             1_800,
         )
         build_publisher(settings).publish(seal(rival, key))
+    elif command == "result":
+        signature = first_bug(settings)
+        told = FixResult(
+            node="laptop-sol",
+            reported_at=datetime.now(UTC),
+            signature=signature,
+            fix_id=fix_id(signature, TEAMMATE_FIX),
+            worked=True,
+        )
+        publisher = build_publisher(settings, topic=results_topic(settings.mqtt_topic))
+        publisher.publish(seal_result(told, key))
     elif command == "forged":
         forged = seal(teammate_fix(settings, "intruder"), b"not-the-team-key-0123456789")
         build_publisher(settings).publish(forged)

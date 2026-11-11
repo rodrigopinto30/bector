@@ -10,9 +10,17 @@ from healer.domain.panel import Check, CheckState
 from healer.domain.patch import FileEdit, Patch
 from healer.domain.proposal import TokenUsage
 from healer.domain.repair import RepairStatus
-from healer.domain.sharing import Evidence, PendingShare, ReceivedSolution, SharedSolution
+from healer.domain.sharing import (
+    Evidence,
+    FixResult,
+    PendingResult,
+    PendingShare,
+    ReceivedSolution,
+    SharedSolution,
+)
 from healer.domain.solution import Solution
 from healer.services.panel import PanelReader, Probe
+from tests.conftest import FakeResults
 
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=UTC)
 TOPIC = "healer/solutions/v1"
@@ -33,6 +41,13 @@ def shared(signature: str = "b" * 64) -> SharedSolution:
     )
 
 
+def received_fix(node: str, new: str) -> ReceivedSolution:
+    solution = shared().model_copy(
+        update={"node": node, "patch": Patch(edits=(FileEdit(path="app.py", old="x", new=new),))}
+    )
+    return ReceivedSolution(solution=solution, received_at=NOW)
+
+
 class FakeLedger:
     def __init__(self, entries: list[LedgerEntry] | None = None, error: Exception | None = None):
         self._entries = entries or []
@@ -48,9 +63,20 @@ class FakeLedger:
 
 
 class FakeOutbox:
-    def __init__(self, pending: list[PendingShare] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        pending: list[PendingShare] | None = None,
+        error: Exception | None = None,
+        results: list[PendingResult] | None = None,
+    ):
         self._pending = pending or []
         self._error = error
+        self._results = results or []
+
+    def pending_results(self) -> list[PendingResult]:
+        if self._error is not None:
+            raise self._error
+        return self._results
 
     def keep(self, pending: PendingShare) -> None:
         raise AssertionError("the panel only reads")
@@ -68,8 +94,11 @@ class FakeOutbox:
 
 
 class FakeProjects:
-    def __init__(self, team_error: Exception | None = None) -> None:
+    def __init__(
+        self, team_error: Exception | None = None, team: list[ReceivedSolution] | None = None
+    ) -> None:
         self.team_error = team_error
+        self.received = team
         self.asked: list[str] = []
 
     def symbols(self, project: str) -> int | None:
@@ -96,6 +125,8 @@ class FakeProjects:
     def team(self) -> list[ReceivedSolution]:
         if self.team_error is not None:
             raise self.team_error
+        if self.received is not None:
+            return self.received
         return [ReceivedSolution(solution=shared(), received_at=NOW)]
 
 
@@ -144,6 +175,7 @@ def reader(**overrides: object) -> PanelReader:
         "ledger": FakeLedger([an_entry(), an_entry("/workspace/api")]),
         "outbox": FakeOutbox(),
         "projects": FakeProjects(),
+        "results": FakeResults(),
         "listener": FakeStatus(),
         "clock": lambda: NOW,
     }
@@ -206,6 +238,51 @@ def test_fixes_waiting_in_the_outbox_need_attention() -> None:
     assert (outbox.state, outbox.detail) == (CheckState.WARNING, "2 fixes are waiting to be sent")
     assert outbox.since == NOW - timedelta(hours=3)
     assert len(snapshot.outbox) == 2
+
+
+def test_results_waiting_in_the_outbox_are_counted_too() -> None:
+    result = PendingResult(
+        result=FixResult(
+            node="laptop-luis",
+            reported_at=NOW,
+            signature="a" * 64,
+            fix_id="f" * 64,
+            worked=True,
+        ),
+        topic=TOPIC,
+        queued_at=NOW - timedelta(hours=1),
+        attempts=1,
+        last_error="down",
+    )
+    waiting = PendingShare(
+        solution=shared(), topic=TOPIC, queued_at=NOW, attempts=1, last_error="down"
+    )
+    snapshot = reader(outbox=FakeOutbox([waiting], results=[result, result])).snapshot()
+    outbox = next(check for check in snapshot.checks if check.key == "outbox")
+    assert outbox.detail == "1 fix and 2 results are waiting to be sent"
+    assert outbox.since == NOW - timedelta(hours=1)
+    only = reader(outbox=FakeOutbox(results=[result])).snapshot()
+    check = next(check for check in only.checks if check.key == "outbox")
+    assert check.detail == "1 result is waiting to be sent"
+
+
+def test_team_fixes_show_their_results_and_the_order_they_are_tried_in() -> None:
+    first = received_fix("laptop-ana", 'c.get("db", "x")')
+    second = received_fix("laptop-eva", 'c.get("db")')
+    results = FakeResults(
+        FixResult(
+            node="laptop-sol",
+            reported_at=NOW,
+            signature=first.solution.signature,
+            fix_id=first.solution.fix_id,
+            worked=True,
+        )
+    )
+    snapshot = reader(projects=FakeProjects(team=[second, first]), results=results).snapshot()
+    assert [(t.node, t.rank, t.worked, t.failed, t.fixes_for_error) for t in snapshot.team] == [
+        ("laptop-eva", 2, 0, 0, 2),
+        ("laptop-ana", 1, 1, 0, 2),
+    ]
 
 
 def test_a_section_that_cannot_be_read_is_empty_and_says_why() -> None:

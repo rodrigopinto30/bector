@@ -12,7 +12,14 @@ from healer.domain.listener import ListenerStatus
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
 from healer.domain.patch import AppliedPatch, Patch
 from healer.domain.proposal import Proposal
-from healer.domain.sharing import PendingShare, ReceivedSolution, TeamMatch
+from healer.domain.ranking import Tally
+from healer.domain.sharing import (
+    FixResult,
+    PendingResult,
+    PendingShare,
+    ReceivedSolution,
+    TeamMatch,
+)
 from healer.domain.solution import Solution
 
 
@@ -152,24 +159,52 @@ class SolutionPublisher(Protocol):
 
 
 class ShareOutbox(Protocol):
-    """Solutions the broker did not take, one per topic and error signature."""
+    """Fixes and results the broker did not take: one entry per topic and fix."""
 
     def keep(self, pending: PendingShare) -> None:
-        """Store ``pending``, replacing an entry for the same topic and signature unless
-        that one was published later. Raise ``OutboxError`` if it cannot be stored."""
+        """Store ``pending``, replacing an entry for the same topic and fix unless that one
+        was published later. Raise ``OutboxError`` if it cannot be stored."""
         ...
 
     def pending(self) -> list[PendingShare]:
-        """Return every entry, the earliest published first."""
+        """Return every fix waiting, the earliest published first."""
         ...
 
-    def remove(self, topic: str, signature: str, *, up_to: datetime) -> None:
-        """Forget the entry for ``topic`` and ``signature`` if it was published no later
-        than ``up_to``, so a newer one stored meanwhile is kept."""
+    def remove(self, topic: str, fix: str, *, up_to: datetime) -> None:
+        """Forget the fix ``fix`` waiting for ``topic`` if it was published no later than
+        ``up_to``, so a newer copy stored meanwhile is kept."""
+        ...
+
+    def keep_result(self, pending: PendingResult) -> None:
+        """Store ``pending``, replacing this node's waiting result for the same topic and
+        fix unless that one is newer. Raise ``OutboxError`` if it cannot be stored."""
+        ...
+
+    def pending_results(self) -> list[PendingResult]:
+        """Return every result waiting, the earliest first."""
+        ...
+
+    def remove_result(self, topic: str, fix: str, *, up_to: datetime) -> None:
+        """Forget the result waiting for ``topic`` and ``fix`` if it is no newer than
+        ``up_to``."""
         ...
 
     def clear(self) -> int:
-        """Forget every entry and return how many there were."""
+        """Forget every fix and result waiting and return how many there were."""
+        ...
+
+
+class ResultStore(Protocol):
+    """What each node said about each fix of the team, one vote per node and fix."""
+
+    def record(self, result: FixResult) -> bool:
+        """Keep ``result`` as its node's word on that fix, unless the node already said
+        something newer. Return True if the tally changed: a new vote, or a changed one.
+        Raise ``ResultsError`` if it cannot be stored."""
+        ...
+
+    def tally(self, fix_ids: Iterable[str]) -> dict[str, Tally]:
+        """Return the tally of each fix that has any result."""
         ...
 
 

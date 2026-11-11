@@ -75,5 +75,9 @@ class OutboxError(HealerError):
     """The fixes waiting to be sent could not be read or written."""
 
 
+class ResultsError(HealerError):
+    """The results of the team's fixes could not be read or written."""
+
+
 class StatusError(HealerError):
     """The record the listener keeps of itself could not be read or written."""

@@ -25,7 +25,7 @@ class ListenerEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     at: datetime
-    kind: Literal["connection", "received", "ignored", "rejected"]
+    kind: Literal["connection", "received", "ignored", "rejected", "result"]
     text: str = Field(max_length=EVENT_TEXT_CHARS)
 
 
@@ -41,7 +41,9 @@ class ListenerStatus(BaseModel):
     started_at: datetime
     changed_at: datetime = Field(description="When the connection last changed.")
     updated_at: datetime = Field(description="The last sign of life.")
-    received: int = Field(default=0, ge=0, description="New or newer suggestions kept.")
+    received: int = Field(
+        default=0, ge=0, description="Suggestions kept and results counted (ADR 0022)."
+    )
     ignored: int = Field(default=0, ge=0, description="Already known, older or sent by this node.")
     rejected: int = Field(default=0, ge=0, description="Forged, malformed or unsafe messages.")
     stopped: bool = False

@@ -22,9 +22,11 @@ import {
 } from "@/components/ui/table"
 import { LEVEL_COLORS } from "@/lib/charts"
 import {
+  fixResults,
   formatCount,
   formatFull,
   formatMoment,
+  ordinal,
   projectName,
   RESOLUTION_LABELS,
   shortSignature,
@@ -189,7 +191,7 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
         icon={UserGroupIcon}
         tint="lavender"
         title="From the team"
-        description="Fixes other computers shared, several per error when they differ. Each one is only a suggestion: healer run tests it, and nothing is applied on its own."
+        description="Fixes other computers shared, several per error when they differ, tried first where they worked most. Each one is only a suggestion: healer run tests it, and nothing is applied on its own."
       />
       {team.length ? (
         team.map((fix) => (
@@ -204,7 +206,10 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
               `received ${timeAgo(fix.received_at, now)}`,
               `found ${formatMoment(fix.published_at)}`,
               `${fix.command}: ${exitCode(fix.exit_code_before)} before, passed after`,
-              ...(fix.fixes_for_error > 1 ? [`${fix.fixes_for_error} fixes for this error`] : []),
+              ...(fix.worked || fix.failed ? [fixResults(fix.worked, fix.failed)] : []),
+              ...(fix.fixes_for_error > 1
+                ? [`tried ${ordinal(fix.rank)} of ${fix.fixes_for_error} for this error`]
+                : []),
             ]}
           />
         ))

@@ -23,18 +23,23 @@ from healer.domain.patch import FileEdit, Patch, parse_patch
 from healer.domain.proposal import Proposal, TokenUsage
 from healer.domain.sharing import (
     Evidence,
+    FixResult,
+    PendingResult,
     PendingShare,
     ReceivedSolution,
     ResendReport,
     SharedSolution,
     TeamMatch,
+    fix_id,
     seal,
+    seal_result,
     unseal,
 )
 from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
+    build_outbox,
     build_panel_reader,
     build_repair_pipeline,
     build_sandbox_runner,
@@ -542,10 +547,10 @@ def test_run_apply_flags_skip_the_question(
 
 
 class FakePublisher:
-    topic = "healer/solutions/v1"
-
-    def __init__(self) -> None:
+    def __init__(self, topic: str = "healer/solutions/v1") -> None:
+        self.topic = topic
         self.messages: list[bytes] = []
+        self.results: FakePublisher | None = None
 
     def publish(self, message: bytes) -> None:
         self.messages.append(message)
@@ -553,13 +558,16 @@ class FakePublisher:
 
 @pytest.fixture
 def team(monkeypatch: pytest.MonkeyPatch) -> FakePublisher:
-    """Sharing on, with a team key and a fake broker."""
+    """Sharing on, with a team key and a fake broker; ``results`` gets the results."""
     publisher = FakePublisher()
+    publisher.results = FakePublisher("healer/solutions/v1/results")
     monkeypatch.setenv("SHARE_SOLUTIONS", "true")
     monkeypatch.setenv("SHARE_KEY", "0123456789abcdef-team-key")
     monkeypatch.setenv("NODE_ID", "laptop-ana")
     monkeypatch.setattr(
-        cli, "build_solution_sharer", partial(build_solution_sharer, publisher=publisher)
+        cli,
+        "build_solution_sharer",
+        partial(build_solution_sharer, publisher=publisher, results_publisher=publisher.results),
     )
     return publisher
 
@@ -879,14 +887,79 @@ def test_listen_keeps_several_fixes_for_one_error_up_to_the_limit(
         "received   KeyError: 'db' from laptop-ana (1 file), kept as a suggestion",
         "received   KeyError: 'db' from laptop-eva (1 file), kept as a suggestion",
         "received   KeyError: 'db' from laptop-eva (1 file), kept; "
-        "the oldest suggestion for this error made room",
+        "the one ranked last for this error made room",
         "ignored    KeyError: 'db' from laptop-ana (1 file): "
-        "older than every suggestion kept for this error",
+        "ranks below every suggestion kept for this error",
     ]
 
     shown = runner.invoke(cli.app, ["team"])
     assert "2 suggestions from the team for 1 error, newest first" in shown.stdout
     assert shown.stdout.count("from laptop-eva") == 2
+
+
+def test_listen_counts_results_about_the_fixes_it_keeps(team_node: Callable[..., None]) -> None:
+    edits = Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new='c.get("db")'),))
+
+    def told(node: str, worked: bool, fix: str = fix_id("a" * 64, edits)) -> bytes:
+        result = FixResult(
+            node=node,
+            reported_at=datetime(2026, 11, 11, 12, 0, tzinfo=UTC),
+            signature="a" * 64,
+            fix_id=fix,
+            worked=worked,
+        )
+        return seal_result(result, TEAM_KEY.encode())
+
+    team_node(
+        FakeSubscriber(
+            team_message(),
+            told("laptop-sol", True),
+            told("laptop-sol", True),
+            told("laptop-max", False),
+            told("laptop-max", True, fix="e" * 64),
+            told("laptop-luis", True),
+        )
+    )
+    result = runner.invoke(cli.app, ["listen"])
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "result" in line] == [
+        "result     laptop-sol: the fix from laptop-ana for KeyError: 'db' worked there",
+        "ignored    result from laptop-sol: already known",
+        "result     laptop-max: the fix from laptop-ana for KeyError: 'db' failed there",
+        "ignored    result from laptop-max: about a fix not kept here",
+    ]
+    assert result.stdout.rstrip().endswith("ignored    sent by this node")
+
+    shown = runner.invoke(cli.app, ["team"])
+    assert "results    worked on 1 node, failed on 1 node" in shown.stdout
+
+
+def test_outbox_lists_the_results_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    at = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
+    build_outbox(Settings()).keep_result(
+        PendingResult(
+            result=FixResult(
+                node="laptop-luis",
+                reported_at=at,
+                signature="a" * 64,
+                fix_id="f" * 64,
+                worked=False,
+            ),
+            topic="healer/solutions/v1",
+            queued_at=at,
+            attempts=1,
+            last_error="the broker could not be reached",
+        )
+    )
+    listed = runner.invoke(cli.app, ["outbox"])
+    assert listed.exit_code == 0, listed.output
+    assert "1 result waiting to be sent, oldest first" in listed.stdout
+    assert "2026-11-11 12:00 UTC  result for healer/solutions/v1" in listed.stdout
+    assert "result     fix ffffffffffff failed here (error aaaaaaaaaaaa)" in listed.stdout
+    doctor = runner.invoke(cli.app, ["doctor"])
+    assert "[info] outbox: 1 result waiting to be sent" in doctor.stdout
+    discarded = runner.invoke(cli.app, ["outbox", "--discard"], input="y\n")
+    assert "discarded  1 result" in discarded.stdout
 
 
 def test_text_from_other_nodes_cannot_control_the_terminal(
@@ -987,10 +1060,29 @@ def test_run_tests_a_team_suggestion_once_approved_and_records_it(
     assert "spent      1 attempt, 0 tokens in, 0 out; saved about 2900 tokens" in result.stdout
     assert "cache      stored" not in result.stdout
     assert "applied    2 files changed in your workspace" in result.stdout
+    assert "result     the fix from laptop-ana worked here\n" in result.stdout
     assert scripted_llm.prompts == []
 
     savings = runner.invoke(cli.app, ["savings"]).stdout.splitlines()
     assert savings[-3].split() == ["total", "1", "1", "0", "1", "0", "0", "2900"]
+    shown = runner.invoke(cli.app, ["team"])
+    assert "results    worked on 1 node\n" in shown.stdout
+
+
+@pytest.mark.integration
+def test_run_tells_the_team_what_its_fixes_did_here(
+    sample: Path, scripted_llm: ScriptedLLM, team: FakePublisher
+) -> None:
+    suggest(node="laptop-eva")
+    result = runner.invoke(cli.app, ["run", TEST_APP, "--path", str(sample)], input="y\ny\n")
+
+    assert result.exit_code == 0, result.output
+    assert "result     the fix from laptop-eva worked here; the team was told" in result.stdout
+    assert team.results is not None
+    [message] = team.results.messages
+    told = unseal(message, b"0123456789abcdef-team-key", max_bytes=10_000)
+    assert isinstance(told, FixResult)
+    assert (told.node, told.worked) == ("laptop-ana", True)
 
 
 @pytest.mark.integration
@@ -1050,6 +1142,7 @@ def test_a_suggestion_that_fails_is_not_recommended_or_sent_to_claude(
     assert result.exit_code == 0, result.output
     assert "result     the tests still fail: AssertionError: assert 2 == 3" in result.stdout
     assert "team       this suggestion does not work here and is not recommended" in result.stdout
+    assert "result     the fix from laptop-ana failed here" in result.stdout
     assert "verdict    fixed: the tests pass with the patch of attempt 3" in result.stdout
     assert scripted_llm.prompts != []
     assert not any("team text" in p or "Ignore your" in p for p in scripted_llm.prompts)
@@ -1242,7 +1335,7 @@ def test_outbox_lists_the_fixes_waiting(isolated_outbox: Path) -> None:
 def test_outbox_without_fixes_waiting() -> None:
     result = runner.invoke(cli.app, ["outbox"])
     assert result.exit_code == 0, result.output
-    assert "no fixes waiting; every shared fix reached the broker" in result.stdout
+    assert "nothing waiting; every shared fix and result reached the broker" in result.stdout
 
 
 def test_outbox_send_delivers_what_waits_for_this_topic(
@@ -1256,9 +1349,7 @@ def test_outbox_send_delivers_what_waits_for_this_topic(
     )
     result = runner.invoke(cli.app, ["outbox", "--send"])
     assert result.exit_code == 0, result.output
-    assert "sending    the fixes waiting for healer/solutions/v1 through 127.0.0.1:1..." in (
-        result.stdout
-    )
+    assert "sending    what waits for healer/solutions/v1 through 127.0.0.1:1..." in (result.stdout)
     assert "resent     1 fix waiting in the outbox" in result.stdout
     assert "kept       1 fix for another topic, sent only when MQTT_TOPIC is that one again" in (
         result.stdout

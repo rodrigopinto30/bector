@@ -24,6 +24,7 @@ from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sandbox_client import SandboxServiceRunner
 from healer.adapters.sqlite_ledger import SqliteLedger
 from healer.adapters.sqlite_outbox import SqliteOutbox
+from healer.adapters.sqlite_results import SqliteResults
 from healer.adapters.subprocess_runner import SubprocessRunner
 from healer.adapters.tempdir_sandbox import TempDirSandboxProvider
 from healer.adapters.workspace_paths import WorkspacePathResolver
@@ -36,7 +37,7 @@ from healer.domain.patch import PatchPolicy
 from healer.domain.ports import CommandRunner, PatchProposer, SolutionPublisher
 from healer.domain.proposal import Proposal
 from healer.domain.redaction import Redactor
-from healer.domain.sharing import MIN_KEY_LENGTH
+from healer.domain.sharing import MIN_KEY_LENGTH, results_topic
 from healer.pipeline.repair import RepairPipeline
 from healer.services.code_index import CodeIndex
 from healer.services.diagnoser import Diagnoser
@@ -202,12 +203,13 @@ def build_ledger(settings: Settings) -> SqliteLedger:
     return SqliteLedger(settings.ledger_path)
 
 
-def build_publisher(settings: Settings) -> MqttPublisher:
+def build_publisher(settings: Settings, *, topic: str | None = None) -> MqttPublisher:
+    """A publisher for the team topic, or for ``topic``."""
     password = settings.mqtt_password
     return MqttPublisher(
         host=settings.mqtt_host,
         port=settings.mqtt_port,
-        topic=settings.mqtt_topic,
+        topic=topic or settings.mqtt_topic,
         client_id=f"healer-{settings.node_id}",
         username=settings.mqtt_username,
         password=password.get_secret_value() if password is not None else None,
@@ -222,8 +224,14 @@ def build_outbox(settings: Settings) -> SqliteOutbox:
     return SqliteOutbox(settings.outbox_path)
 
 
+def build_results(settings: Settings) -> SqliteResults:
+    return SqliteResults(settings.results_path, settings.mqtt_topic)
+
+
 def build_solution_sharer(
-    settings: Settings, publisher: SolutionPublisher | None = None
+    settings: Settings,
+    publisher: SolutionPublisher | None = None,
+    results_publisher: SolutionPublisher | None = None,
 ) -> SolutionSharer:
     return SolutionSharer(
         publisher or build_publisher(settings),
@@ -232,6 +240,8 @@ def build_solution_sharer(
         key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
         outbox=build_outbox(settings),
+        results_publisher=results_publisher
+        or build_publisher(settings, topic=results_topic(settings.mqtt_topic)),
     )
 
 
@@ -240,7 +250,7 @@ def build_subscriber(settings: Settings) -> MqttSubscriber:
     return MqttSubscriber(
         host=settings.mqtt_host,
         port=settings.mqtt_port,
-        topic=settings.mqtt_topic,
+        topics=(settings.mqtt_topic, results_topic(settings.mqtt_topic)),
         client_id=f"healer-listener-{settings.node_id}",
         username=settings.mqtt_username,
         password=password.get_secret_value() if password is not None else None,
@@ -265,6 +275,7 @@ def build_suggestion_finder(
 ) -> SuggestionFinder:
     return SuggestionFinder(
         build_team_solutions(settings, embedding_function),
+        results=build_results(settings),
         max_distance=settings.team_max_distance,
         max_matches=settings.team_max_suggestions,
     )
@@ -276,6 +287,7 @@ def build_solution_ingester(
     return SolutionIngester(
         build_team_solutions(settings, embedding_function),
         _patch_policy(settings),
+        results=build_results(settings),
         node=settings.node_id,
         key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
@@ -313,6 +325,7 @@ def build_panel_reader(
         ledger=build_ledger(settings),
         outbox=build_outbox(settings),
         projects=projects,
+        results=build_results(settings),
         listener=build_listener_status(settings),
         checks=[
             Probe(

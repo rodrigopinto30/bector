@@ -1,15 +1,19 @@
-"""Use case: accept a message from another node as a suggestion, or refuse it."""
+"""Use case: accept a message from another node, a fix or a result, or refuse it."""
 
 from collections.abc import Callable
 from datetime import UTC, datetime
 
 from healer.domain.errors import InvalidPatchError, RejectedMessageError
 from healer.domain.patch import PatchPolicy
-from healer.domain.ports import TeamSolutionRepository
+from healer.domain.ports import ResultStore, TeamSolutionRepository
+from healer.domain.ranking import rank_key
 from healer.domain.sharing import (
+    FixResult,
     Ingested,
     IngestOutcome,
     ReceivedSolution,
+    ResultIngested,
+    ResultOutcome,
     SharedSolution,
     check_key,
     unseal,
@@ -19,14 +23,20 @@ from healer.domain.sharing import (
 class SolutionIngester:
     """Everything received is untrusted input (7.5), and it is only ever stored.
 
-    A message must carry a valid signature, follow the schema, stay within the size limit,
-    show that the tests failed before the patch, and hold a patch that follows the same
-    rules as any other. Valid messages are kept per fix (ADR 0021): the same edits for the
-    same error again change nothing, so ingestion stays idempotent (7.6), while other edits
-    for that error are kept beside them. An error keeps at most ``fixes_per_error`` fixes,
-    the most recently found: a newer one makes room by dropping the oldest, and an older
-    one is ignored, so replaying old messages cannot push out newer fixes. A node ignores
-    its own messages. Nothing here applies or tests a patch.
+    A message must carry a valid signature, follow the schema and stay within the size
+    limit. A fix must also show that the tests failed before the patch, and hold a patch
+    that follows the same rules as any other. Fixes are kept per fix (ADR 0021): the same
+    edits for the same error again change nothing, so ingestion stays idempotent (7.6),
+    while other edits for that error are kept beside them.
+
+    An error keeps at most ``fixes_per_error`` fixes, the best ranked (ADR 0022): the
+    share of nodes where each worked, then how many, then the most recently found. A new
+    fix has no results yet, so it ranks like any other fix nobody tried, and a full error
+    drops whichever ranks last. On a tie the fix that just arrived loses, so replaying old
+    messages cannot push out newer fixes.
+
+    A result counts one vote per node and fix, its latest, and only for a fix kept here.
+    A node ignores its own messages. Nothing here applies or tests a patch.
     """
 
     def __init__(
@@ -34,6 +44,7 @@ class SolutionIngester:
         store: TeamSolutionRepository,
         policy: PatchPolicy,
         *,
+        results: ResultStore,
         node: str,
         key: bytes,
         max_bytes: int,
@@ -45,15 +56,22 @@ class SolutionIngester:
             raise ValueError("an error must keep at least one fix")
         self._store = store
         self._policy = policy
+        self._results = results
         self._node = node
         self._key = key
         self._max_bytes = max_bytes
         self._fixes_per_error = fixes_per_error
         self._clock = clock
 
-    def ingest(self, data: bytes) -> Ingested:
-        """Keep the solution in ``data``; raise ``RejectedMessageError`` if it is not valid."""
-        solution = unseal(data, self._key, max_bytes=self._max_bytes)
+    def ingest(self, data: bytes) -> Ingested | ResultIngested:
+        """Keep the fix or the result in ``data``; raise ``RejectedMessageError`` if it is
+        not valid."""
+        message = unseal(data, self._key, max_bytes=self._max_bytes)
+        if isinstance(message, FixResult):
+            return self._count(message)
+        return self._keep(message)
+
+    def _keep(self, solution: SharedSolution) -> Ingested:
         self._check(solution)
         if solution.node == self._node:
             return Ingested(outcome=IngestOutcome.OWN, solution=solution)
@@ -61,17 +79,35 @@ class SolutionIngester:
         if any(k.solution.patch.edits == solution.patch.edits for k in known):
             return Ingested(outcome=IngestOutcome.DUPLICATE, solution=solution)
         arrived = ReceivedSolution(solution=solution, received_at=self._clock())
-        # The newest first; on a tie the one that just arrived goes last, so it never
-        # pushes out a fix found at the same moment.
-        ranked = sorted([*known, arrived], key=lambda k: k.solution.published_at, reverse=True)
+        # The new fix may have results already: kept before, dropped, and sent again.
+        tallies = self._results.tally(k.solution.fix_id for k in [*known, arrived])
+        # Sorting is stable, so on a tie the fix that just arrived, listed last, stays last.
+        ranked = sorted([*known, arrived], key=lambda fix: rank_key(fix, tallies), reverse=True)
         dropped = ranked[self._fixes_per_error :]
         if any(stale is arrived for stale in dropped):
-            return Ingested(outcome=IngestOutcome.OLDER, solution=solution)
+            return Ingested(outcome=IngestOutcome.OUTRANKED, solution=solution)
         self._store.save(arrived)
         for stale in dropped:
             self._store.remove(stale)
         outcome = IngestOutcome.REPLACED if dropped else IngestOutcome.NEW
         return Ingested(outcome=outcome, solution=solution)
+
+    def _count(self, result: FixResult) -> ResultIngested:
+        if result.node == self._node:
+            return ResultIngested(outcome=ResultOutcome.OWN, result=result)
+        fix = next(
+            (
+                kept.solution
+                for kept in self._store.for_signature(result.signature)
+                if kept.solution.fix_id == result.fix_id
+            ),
+            None,
+        )
+        if fix is None:
+            return ResultIngested(outcome=ResultOutcome.UNKNOWN, result=result)
+        counted = self._results.record(result)
+        outcome = ResultOutcome.COUNTED if counted else ResultOutcome.KNOWN
+        return ResultIngested(outcome=outcome, result=result, fix=fix)
 
     def _check(self, solution: SharedSolution) -> None:
         if solution.evidence.exit_code_before == 0:
