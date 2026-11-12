@@ -22,6 +22,7 @@ from healer.adapters.panel_server import LOCAL_HOSTS, PanelApp
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sandbox_client import SandboxServiceRunner
+from healer.adapters.sqlite_history import SqliteHistory
 from healer.adapters.sqlite_ledger import SqliteLedger
 from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.adapters.sqlite_results import SqliteResults
@@ -228,6 +229,10 @@ def build_results(settings: Settings) -> SqliteResults:
     return SqliteResults(settings.results_path, settings.mqtt_topic)
 
 
+def build_history(settings: Settings) -> SqliteHistory:
+    return SqliteHistory(settings.history_path, max_runs=settings.history_max_runs)
+
+
 def build_solution_sharer(
     settings: Settings,
     publisher: SolutionPublisher | None = None,
@@ -326,6 +331,7 @@ def build_panel_reader(
         outbox=build_outbox(settings),
         projects=projects,
         results=build_results(settings),
+        history=build_history(settings),
         listener=build_listener_status(settings),
         checks=[
             Probe(
@@ -349,9 +355,11 @@ def build_panel_reader(
 
 
 def build_panel_app(settings: Settings, *, extra_hosts: Iterable[str] = ()) -> PanelApp:
+    reader = build_panel_reader(settings)
     return PanelApp(
-        build_panel_reader(settings).snapshot,
+        reader.snapshot,
         settings.panel_pages,
+        run=reader.run,
         allowed_hosts=LOCAL_HOSTS | {host.lower() for host in extra_hosts},
     )
 

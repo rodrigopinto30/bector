@@ -4,12 +4,14 @@ only. A plain ASGI application, run by uvicorn."""
 import asyncio
 import base64
 import hashlib
+import json
 import re
 from collections.abc import Awaitable, Callable, MutableMapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from healer.domain.panel import PanelSnapshot
+from healer.domain.errors import HealerError
+from healer.domain.panel import PanelSnapshot, RunView
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -18,6 +20,8 @@ Send = Callable[[Message], Awaitable[None]]
 
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
 SNAPSHOT_PATH = "/api/snapshot"
+RUNS_PATH = "/api/runs/"
+_RUN_ID = re.compile(r"[0-9a-f]{16}")
 
 _HOST = re.compile(r"(?P<name>\[[0-9a-f:.]+\]|[^:\[\]]+)(?::[0-9]{1,5})?")
 _INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script>", re.S | re.I)
@@ -52,16 +56,21 @@ _NOT_BUILT = (
 class PanelApp:
     """Answers only GET and HEAD, and only to a Host of this computer: a page from any other
     site that resolves its own name to 127.0.0.1 (DNS rebinding) is refused. Each page may
-    run only its own scripts, allowed by hash, and fetch only from this server."""
+    run only its own scripts, allowed by hash, and fetch only from this server.
+
+    ``/api/runs/<id>`` gives one run step by step, asked for only when a page opens it, so
+    the snapshot fetched every few seconds stays small."""
 
     def __init__(
         self,
         snapshot: Callable[[], PanelSnapshot],
         pages: Path | None,
         *,
+        run: Callable[[str], RunView | None] | None = None,
         allowed_hosts: frozenset[str] = LOCAL_HOSTS,
     ) -> None:
         self._snapshot = snapshot
+        self._run = run
         self._pages = pages.resolve() if pages is not None and pages.is_dir() else None
         self._allowed = allowed_hosts
 
@@ -89,10 +98,31 @@ class PanelApp:
             body = await asyncio.to_thread(lambda: self._snapshot().model_dump_json().encode())
             await _respond(send, 200, body, "application/json", head=head)
             return
+        if path.startswith(RUNS_PATH) and self._run is not None:
+            await self._run_page(send, path.removeprefix(RUNS_PATH), head=head)
+            return
         if path.startswith("/api/"):
             await _respond(send, 404, b'{"error":"not found"}', "application/json", head=head)
             return
         await self._page(send, path, head=head)
+
+    async def _run_page(self, send: Send, identifier: str, *, head: bool) -> None:
+        if not _RUN_ID.fullmatch(identifier):
+            await _respond(send, 404, b'{"error":"not found"}', "application/json", head=head)
+            return
+        read = self._run
+        assert read is not None
+        try:
+            found = await asyncio.to_thread(read, identifier)
+        except HealerError as exc:
+            body = json.dumps({"error": str(exc)}).encode()
+            await _respond(send, 500, body, "application/json", head=head)
+            return
+        if found is None:
+            body = b'{"error":"this run is no longer kept"}'
+            await _respond(send, 404, body, "application/json", head=head)
+            return
+        await _respond(send, 200, found.model_dump_json().encode(), "application/json", head=head)
 
     def _local(self, scope: Scope) -> bool:
         hosts = [value for name, value in scope["headers"] if name == b"host"]

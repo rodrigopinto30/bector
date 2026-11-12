@@ -18,6 +18,7 @@ from healer.config import Settings
 from healer.domain.diagnosis import Diagnosis
 from healer.domain.errors import HealerError, RejectedMessageError
 from healer.domain.execution import RunReport
+from healer.domain.history import Shared, run_record
 from healer.domain.ledger import LedgerSummary, summarize, total
 from healer.domain.patch import AppliedPatch, Patch, parse_patch
 from healer.domain.proposal import SYSTEM_PROMPT, TokenUsage, render_request
@@ -47,6 +48,7 @@ from healer.factory import (
     build_diagnoser,
     build_fix_installer,
     build_fix_proposer,
+    build_history,
     build_ledger,
     build_listener_status,
     build_outbox,
@@ -523,22 +525,62 @@ def run(
         raise typer.Exit(code=2) from exc
     sharing = settings.share_solutions if share is None else share
     fix = _report_repair(result, save)
-    _tell_results(settings, result, enabled=sharing)
-    if fix is None or fix.report is None or fix.report.patch is None:
-        return
-    from_team = fix.source is AttemptSource.TEAM
-    if from_team and apply:
-        typer.echo("team       --apply does not cover fixes from the team: confirm this one")
-    applied = _offer_fix(
-        path,
+    told = _tell_results(settings, result, enabled=sharing)
+    applied: bool | None = None
+    shared: Shared | None = None
+    if fix is not None and fix.report is not None and fix.report.patch is not None:
+        from_team = fix.source is AttemptSource.TEAM
+        if from_team and apply:
+            typer.echo("team       --apply does not cover fixes from the team: confirm this one")
+        applied = _offer_fix(
+            path,
+            settings,
+            fix.proposal.patch,
+            fix.report.patch,
+            apply=None if from_team and apply else apply,
+            saved=save,
+        )
+        if applied and result.solution is not None:
+            shared = _share(settings, result.solution, enabled=sharing)
+    _keep_run(
         settings,
-        fix.proposal.patch,
-        fix.report.patch,
-        apply=None if from_team and apply else apply,
-        saved=save,
+        result,
+        command=command or settings.test_command,
+        applied=applied,
+        shared=shared,
+        told=told,
     )
-    if applied and result.solution is not None:
-        _share(settings, result.solution, enabled=sharing)
+
+
+def _keep_run(
+    settings: Settings,
+    result: RepairResult,
+    *,
+    command: str,
+    applied: bool | None,
+    shared: Shared | None,
+    told: int,
+) -> None:
+    """Keep the run step by step, redacted, so the panel can show it (ADR 0023). Only runs
+    the ledger counted are kept. A failure is reported and changes nothing else."""
+    if result.recorded_at is None:
+        return
+    record = run_record(
+        result,
+        project=result.project,
+        recorded_at=result.recorded_at,
+        command=command,
+        redactor=Redactor(),
+        applied=applied,
+        shared=shared,
+        results_told=told,
+    )
+    if record is None:
+        return
+    try:
+        build_history(settings).keep(record)
+    except HealerError as exc:
+        typer.echo(f"warning: the run was not kept for the panel: {exc}", err=True)
 
 
 def _approve_suggestion(match: TeamMatch, *, isolated: bool) -> bool:
@@ -728,14 +770,15 @@ def _offer_fix(
     return True
 
 
-def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
-    """Send an applied fix to the team. A failure is reported but never undoes the fix.
+def _share(settings: Settings, solution: Solution, *, enabled: bool) -> Shared:
+    """Send an applied fix to the team, and say what happened. A failure is reported but
+    never undoes the fix.
 
     A fix the broker does not take waits in the outbox. Once one is delivered, the broker
     is back, so the ones waiting are sent as well.
     """
     if not enabled:
-        return
+        return "off"
     try:
         sharer = build_solution_sharer(settings)
         typer.echo(
@@ -745,14 +788,14 @@ def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
         receipt = sharer.share(solution)
     except HealerError as exc:
         typer.echo(f"warning: the fix was applied but not shared: {exc}", err=True)
-        return
+        return "failed"
     if not receipt.delivered:
         typer.echo(f"warning: the fix was applied but not sent yet: {receipt.failure}", err=True)
         typer.echo(
             "waiting    kept in the outbox: 'healer listen' sends it when the broker is back, "
             "or send it with 'healer outbox --send'"
         )
-        return
+        return "waiting"
     hidden = f", {_plural(receipt.hidden, 'secret')} hidden" if receipt.hidden else ""
     typer.echo(
         f"shared     sent to the team as node {receipt.solution.node} on "
@@ -762,15 +805,16 @@ def _share(settings: Settings, solution: Solution, *, enabled: bool) -> None:
         _echo_resend(sharer.resend())
     except HealerError as exc:
         typer.echo(f"warning: the fixes waiting in the outbox were not sent: {exc}", err=True)
+    return "sent"
 
 
-def _tell_results(settings: Settings, result: RepairResult, *, enabled: bool) -> None:
+def _tell_results(settings: Settings, result: RepairResult, *, enabled: bool) -> int:
     """Keep what this run learned about the team's fixes, and tell the team with sharing
     on (ADR 0022). A result says which fix worked or failed here, never code. A failure is
-    reported and changes nothing else."""
+    reported and changes nothing else. Return how many the team was told or will be."""
     found = results_of(result.attempts, node=settings.node_id, at=datetime.now(UTC))
     if not found:
-        return
+        return 0
     origins = {attempt.fix: attempt.origin for attempt in result.attempts if attempt.fix}
     try:
         store = build_results(settings)
@@ -784,6 +828,7 @@ def _tell_results(settings: Settings, result: RepairResult, *, enabled: bool) ->
             sharer = build_solution_sharer(settings)
         except HealerError as exc:
             typer.echo(f"warning: the team was not told the results: {exc}", err=True)
+    told = 0
     for item in found:
         line = (
             f"result     the fix from {_printable(origins[item.fix_id])} "
@@ -798,8 +843,10 @@ def _tell_results(settings: Settings, result: RepairResult, *, enabled: bool) ->
             typer.echo(line)
             typer.echo(f"warning: the team was not told this result: {exc}", err=True)
             continue
-        told = "the team was told" if receipt.delivered else "it waits in the outbox"
-        typer.echo(f"{line}; {told}")
+        told += 1
+        what = "the team was told" if receipt.delivered else "it waits in the outbox"
+        typer.echo(f"{line}; {what}")
+    return told
 
 
 def _results(worked: int, failed: int) -> str:

@@ -10,8 +10,11 @@ from typing import Any
 import pytest
 
 from healer.adapters.panel_server import PanelApp, page_policy
+from healer.domain.errors import HistoryError
 from healer.domain.ledger import LedgerSummary
-from healer.domain.panel import PanelSnapshot, ResolutionCounts, Savings
+from healer.domain.panel import PanelSnapshot, ResolutionCounts, RunView, Savings
+
+RUN_FIXTURE = Path(__file__).parents[2] / "panel" / "src" / "lib" / "fixtures" / "run.json"
 
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=UTC)
 PAGE = (
@@ -226,3 +229,46 @@ def test_it_answers_the_server_lifespan(pages: Path) -> None:
         "lifespan.startup.complete",
         "lifespan.shutdown.complete",
     ]
+
+
+RUN = RunView.model_validate(json.loads(RUN_FIXTURE.read_text()))
+
+
+def runs(identifier: str) -> RunView | None:
+    if identifier == RUN.run_id:
+        return RUN
+    if identifier == "0" * 16:
+        raise HistoryError("Cannot use the history at /data/history.sqlite3: disk I/O error")
+    return None
+
+
+def test_a_run_is_served_when_a_page_asks_for_it(pages: Path) -> None:
+    app = PanelApp(snapshot, pages, run=runs)
+    status, headers, body = call(app, f"/api/runs/{RUN.run_id}")
+    assert (status, headers["content-type"]) == (200, "application/json")
+    assert headers["cache-control"] == "no-store"
+    assert RunView.model_validate_json(body) == RUN
+
+
+@pytest.mark.parametrize(
+    ("identifier", "status", "says"),
+    [
+        ("f" * 16, 404, "no longer kept"),
+        ("0" * 16, 500, "disk I/O error"),
+        ("not-an-id", 404, "not found"),
+        ("F" * 16, 404, "not found"),
+        ("f" * 17, 404, "not found"),
+        (f"{'f' * 16}/../snapshot", 404, "not found"),
+    ],
+)
+def test_a_run_that_cannot_be_served_says_why(
+    pages: Path, identifier: str, status: int, says: str
+) -> None:
+    answered, headers, body = call(PanelApp(snapshot, pages, run=runs), f"/api/runs/{identifier}")
+    assert (answered, headers["content-type"]) == (status, "application/json")
+    assert says in json.loads(body)["error"]
+
+
+def test_runs_are_not_found_without_a_history(pages: Path) -> None:
+    status, _, _ = call(PanelApp(snapshot, pages), f"/api/runs/{RUN.run_id}")
+    assert status == 404

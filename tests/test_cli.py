@@ -19,8 +19,10 @@ from healer.adapters.panel_server import PanelApp
 from healer.adapters.sqlite_outbox import SqliteOutbox
 from healer.config import Settings
 from healer.domain.errors import ExecutionError, SharingError
+from healer.domain.history import run_id
 from healer.domain.patch import FileEdit, Patch, parse_patch
 from healer.domain.proposal import Proposal, TokenUsage
+from healer.domain.repair import AttemptOutcome, AttemptSource
 from healer.domain.sharing import (
     Evidence,
     FixResult,
@@ -39,6 +41,8 @@ from healer.factory import (
     build_code_index,
     build_diagnoser,
     build_fix_proposer,
+    build_history,
+    build_ledger,
     build_outbox,
     build_panel_reader,
     build_repair_pipeline,
@@ -1065,6 +1069,13 @@ def test_run_tests_a_team_suggestion_once_approved_and_records_it(
 
     savings = runner.invoke(cli.app, ["savings"]).stdout.splitlines()
     assert savings[-3].split() == ["total", "1", "1", "0", "1", "0", "0", "2900"]
+    [entry] = build_ledger(Settings()).entries()
+    kept = build_history(Settings()).get(run_id(entry.project, entry.recorded_at))
+    assert kept is not None
+    assert (kept.applied, kept.shared, kept.results_told) == (True, None, 0)
+    assert [(a.source, a.origin, a.outcome) for a in kept.attempts] == [
+        (AttemptSource.TEAM, "laptop-ana", AttemptOutcome.PASSED)
+    ]
     shown = runner.invoke(cli.app, ["team"])
     assert "results    worked on 1 node\n" in shown.stdout
 
@@ -1078,6 +1089,9 @@ def test_run_tells_the_team_what_its_fixes_did_here(
 
     assert result.exit_code == 0, result.output
     assert "result     the fix from laptop-eva worked here; the team was told" in result.stdout
+    [entry] = build_ledger(Settings()).entries()
+    kept = build_history(Settings()).get(run_id(entry.project, entry.recorded_at))
+    assert kept is not None and (kept.applied, kept.results_told) == (True, 1)
     assert team.results is not None
     [message] = team.results.messages
     told = unseal(message, b"0123456789abcdef-team-key", max_bytes=10_000)

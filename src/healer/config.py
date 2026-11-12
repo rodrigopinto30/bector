@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     outbox_path: Path = Path(".healer/outbox.sqlite3")
     outbox_retry_seconds: float = Field(default=300.0, gt=0)
     results_path: Path = Path(".healer/results.sqlite3")
+    history_path: Path = Path(".healer/history.sqlite3")
+    history_max_runs: int = Field(default=200, ge=1)
     listener_status_path: Path = Path(".healer/listener.json")
     panel_pages: Path | None = None
     mqtt_host: str = "localhost"

@@ -35,6 +35,7 @@ DATA_ENV=(
   -e LEDGER_PATH=/demo/ledger.sqlite3
   -e OUTBOX_PATH=/demo/outbox.sqlite3
   -e RESULTS_PATH=/demo/results.sqlite3
+  -e HISTORY_PATH=/demo/history.sqlite3
   -e LISTENER_STATUS_PATH=/demo/listener.json
   -e "NODE_ID=$NODE"
   -e "MQTT_TOPIC=$TOPIC"
@@ -165,7 +166,8 @@ say "laptop-eva's fix, the newest, was tried first: these tests reject it. Then"
 say "laptop-ana's passed in the sandbox and was applied, for 0 tokens. This computer"
 say "told the team both results; its listener ignores them, since it sent them: 2"
 say "ignored. Tab Team: laptop-ana's fix worked on 1 node and is now tried 1st;"
-say "laptop-eva's failed on 1. Overview: 1 incident, solved by the team."
+say "laptop-eva's failed on 1. Overview: 1 incident, solved by the team. Tab Incidents:"
+say "Show, under Steps, opens the run step by step, with both attempts and their changes."
 pause
 
 event "6/10  Another teammate says how laptop-ana's fix did there"

@@ -96,6 +96,14 @@ def isolated_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own history of runs, so none changes what the panel shows."""
+    path = tmp_path / "history.sqlite3"
+    monkeypatch.setenv("HISTORY_PATH", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def isolated_listener_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Every test gets its own listener status, so none can change what the panel shows."""
     path = tmp_path / "listener.json"

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import TypeVar
 
 from healer.domain.errors import HealerError
+from healer.domain.history import run_id
 from healer.domain.ledger import LedgerEntry
 from healer.domain.listener import ListenerStatus
 from healer.domain.panel import (
@@ -16,6 +17,7 @@ from healer.domain.panel import (
     IncidentView,
     PanelSnapshot,
     ProjectView,
+    RunView,
     Savings,
     TeamFixView,
     WaitingFixView,
@@ -23,6 +25,7 @@ from healer.domain.panel import (
     incident_view,
     listener_check,
     project_views,
+    run_view,
     savings,
     team_fix_views,
     waiting_fix_view,
@@ -33,6 +36,7 @@ from healer.domain.ports import (
     ListenerStatusStore,
     ProjectStore,
     ResultStore,
+    RunHistory,
     ShareOutbox,
 )
 from healer.domain.sharing import PendingResult
@@ -69,6 +73,7 @@ class PanelReader:
         outbox: ShareOutbox,
         projects: ProjectStore,
         results: ResultStore,
+        history: RunHistory,
         listener: ListenerStatusStore,
         checks: Sequence[Check | Probe] = (),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -80,6 +85,7 @@ class PanelReader:
         self._outbox = outbox
         self._projects = projects
         self._results = results
+        self._history = history
         self._listener = listener
         self._checks = checks
         self._clock = clock
@@ -90,7 +96,13 @@ class PanelReader:
 
         entries: list[LedgerEntry] = self._read("savings", problems, self._ledger.entries, [])
         recent = sorted(entries, key=lambda e: e.recorded_at, reverse=True)[:INCIDENTS_SHOWN]
-        incidents: list[IncidentView] = [incident_view(e) for e in recent]
+        kept_runs: set[str] = self._read(
+            "history",
+            problems,
+            lambda: self._history.known(run_id(e.project, e.recorded_at) for e in recent),
+            set(),
+        )
+        incidents: list[IncidentView] = [incident_view(e, kept_runs=kept_runs) for e in recent]
         listener: ListenerStatus | None = self._read(
             "listener", problems, self._listener.load, None
         )
@@ -133,6 +145,12 @@ class PanelReader:
             activity=activity(incidents=incidents, team=team, outbox=waiting, listener=listener),
             problems=problems,
         )
+
+    def run(self, identifier: str) -> RunView | None:
+        """One run, step by step, or None if the history does not keep it. A history that
+        cannot be read raises ``HistoryError``."""
+        record = self._history.get(identifier)
+        return run_view(record) if record is not None else None
 
     def _waiting(self) -> list[WaitingFixView]:
         return [waiting_fix_view(p, topic=self._topic) for p in self._outbox.pending()]
