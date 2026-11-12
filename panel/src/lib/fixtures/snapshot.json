@@ -317,7 +317,8 @@
       "resolution": "team",
       "model_attempts": 0,
       "tokens_used": 0,
-      "tokens_saved": 4800
+      "tokens_saved": 4800,
+      "run_id": "1d31d0522edf9fab"
     },
     {
       "recorded_at": "2026-11-09T11:00:00Z",
@@ -328,7 +329,8 @@
       "resolution": "model",
       "model_attempts": 1,
       "tokens_used": 3200,
-      "tokens_saved": 0
+      "tokens_saved": 0,
+      "run_id": "6341d7562557f7a2"
     },
     {
       "recorded_at": "2026-11-08T13:00:00Z",
@@ -339,7 +341,8 @@
       "resolution": "cache",
       "model_attempts": 0,
       "tokens_used": 0,
-      "tokens_saved": 9400
+      "tokens_saved": 9400,
+      "run_id": "eb281a197398adbc"
     },
     {
       "recorded_at": "2026-11-08T10:00:00Z",
@@ -350,7 +353,8 @@
       "resolution": "cache",
       "model_attempts": 0,
       "tokens_used": 0,
-      "tokens_saved": 6100
+      "tokens_saved": 6100,
+      "run_id": null
     },
     {
       "recorded_at": "2026-11-07T11:00:00Z",
@@ -361,7 +365,8 @@
       "resolution": "none",
       "model_attempts": 3,
       "tokens_used": 21000,
-      "tokens_saved": 0
+      "tokens_saved": 0,
+      "run_id": null
     },
     {
       "recorded_at": "2026-11-06T09:00:00Z",
@@ -372,7 +377,8 @@
       "resolution": "cache",
       "model_attempts": 0,
       "tokens_used": 0,
-      "tokens_saved": 6100
+      "tokens_saved": 6100,
+      "run_id": null
     },
     {
       "recorded_at": "2026-11-05T13:00:00Z",
@@ -383,7 +389,8 @@
       "resolution": "model",
       "model_attempts": 3,
       "tokens_used": 15200,
-      "tokens_saved": 0
+      "tokens_saved": 0,
+      "run_id": null
     },
     {
       "recorded_at": "2026-11-04T12:00:00Z",
@@ -394,7 +401,8 @@
       "resolution": "team",
       "model_attempts": 0,
       "tokens_used": 0,
-      "tokens_saved": 4800
+      "tokens_saved": 4800,
+      "run_id": null
     },
     {
       "recorded_at": "2026-11-02T14:00:00Z",
@@ -405,7 +413,8 @@
       "resolution": "cache",
       "model_attempts": 0,
       "tokens_used": 0,
-      "tokens_saved": 9400
+      "tokens_saved": 9400,
+      "run_id": null
     },
     {
       "recorded_at": "2026-10-31T10:00:00Z",
@@ -416,7 +425,8 @@
       "resolution": "model",
       "model_attempts": 1,
       "tokens_used": 6100,
-      "tokens_saved": 0
+      "tokens_saved": 0,
+      "run_id": null
     },
     {
       "recorded_at": "2026-10-28T13:00:00Z",
@@ -427,7 +437,8 @@
       "resolution": "model",
       "model_attempts": 2,
       "tokens_used": 9400,
-      "tokens_saved": 0
+      "tokens_saved": 0,
+      "run_id": null
     }
   ],
   "projects": [

@@ -9,11 +9,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from healer.domain.history import RunOfTests, RunRecord, Shared, run_id
 from healer.domain.ledger import LedgerEntry, LedgerSummary, Resolution, total
 from healer.domain.listener import STALE_AFTER, ListenerStatus
 from healer.domain.patch import FileEdit, Patch
 from healer.domain.ranking import NO_RESULTS, Tally, ranked
-from healer.domain.repair import RepairStatus
+from healer.domain.repair import AttemptOutcome, AttemptSource, RepairStatus
 from healer.domain.sharing import PendingShare, ReceivedSolution
 from healer.domain.solution import Solution
 
@@ -83,6 +84,9 @@ class IncidentView(BaseModel):
     model_attempts: int
     tokens_used: int
     tokens_saved: int
+    run_id: str | None = Field(
+        default=None, description="Its run, step by step, when the history keeps it."
+    )
 
 
 class DiffLine(BaseModel):
@@ -248,8 +252,65 @@ def daily_tokens(
     return list(rows.values())
 
 
-def incident_view(entry: LedgerEntry) -> IncidentView:
+class AttemptView(BaseModel):
+    """One attempt of a run, with its change as lines."""
+
+    model_config = ConfigDict(frozen=True)
+
+    number: int
+    source: AttemptSource
+    origin: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    saved_tokens: int
+    outcome: AttemptOutcome
+    explanation: str
+    problem: str
+    tests: RunOfTests | None
+    edits: list[EditView]
+    edits_cut: bool
+
+
+class RunView(BaseModel):
+    """A run of healer run, step by step (ADR 0023)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    project: str
+    recorded_at: datetime
+    command: str
+    status: RepairStatus
+    detail: str
+    error: str
+    error_type: str
+    location: str
+    signature: str
+    baseline: RunOfTests
+    attempts: list[AttemptView]
+    applied: bool | None
+    shared: Shared | None
+    results_told: int
+
+
+def run_view(record: RunRecord) -> RunView:
+    return RunView(
+        **record.model_dump(exclude={"attempts"}),
+        attempts=[
+            AttemptView(
+                **attempt.model_dump(exclude={"edits"}),
+                edits=[edit_view(edit) for edit in attempt.edits],
+            )
+            for attempt in record.attempts
+        ],
+    )
+
+
+def incident_view(entry: LedgerEntry, *, kept_runs: set[str] | None = None) -> IncidentView:
+    identifier = run_id(entry.project, entry.recorded_at)
     return IncidentView(
+        run_id=identifier if kept_runs is not None and identifier in kept_runs else None,
         recorded_at=entry.recorded_at,
         project=entry.project,
         signature=entry.signature,

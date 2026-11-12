@@ -262,6 +262,12 @@ def test_fixed_on_the_first_attempt() -> None:
     assert result.fix is not None and result.fix.proposal.patch == FULL
     assert proposer.calls == [(KEY_ERROR, ())]
     assert runner.runs == [None, FULL]
+    assert (result.project, result.recorded_at) == ("/workspace", NOW)
+
+
+def test_a_run_with_nothing_to_record_has_no_time_in_the_ledger() -> None:
+    result = build(FakeRunner(report()), FakeProposer([])).run("python -m pytest")
+    assert (result.project, result.recorded_at) == ("/workspace", None)
 
 
 def test_a_failed_attempt_is_shown_to_the_model_on_the_next_one() -> None:

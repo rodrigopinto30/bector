@@ -1,5 +1,6 @@
 """Records of the self-correction loop: each attempt and how the whole run ended."""
 
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -99,6 +100,10 @@ class RepairResult(BaseModel):
     stored: bool = Field(default=False, description="The fix was kept for reuse.")
     solution: Solution | None = Field(
         default=None, description="The fix with the evidence of this run, ready to be shared."
+    )
+    project: str = Field(default="", description="The workspace, as the ledger names it.")
+    recorded_at: datetime | None = Field(
+        default=None, description="When the incident went to the ledger; None if it did not."
     )
 
     @property

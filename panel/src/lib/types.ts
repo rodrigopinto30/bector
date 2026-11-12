@@ -74,6 +74,8 @@ export type Incident = {
   model_attempts: number
   tokens_used: number
   tokens_saved: number
+  /** Its run, step by step, when the history keeps it: /api/runs/<run_id>. */
+  run_id: string | null
 }
 
 export type DiffLine = {
@@ -166,4 +168,52 @@ export type Snapshot = {
   outbox: WaitingFix[]
   activity: ActivityItem[]
   problems: Record<string, string>
+}
+
+/** One run of the tests, as kept in the history of a run. */
+export type RunOfTests = {
+  exit_code: number | null
+  duration_seconds: number
+  timed_out: boolean
+  passed: boolean
+  failures: string[]
+  more_failures: number
+}
+
+export type AttemptSource = "cache" | "team" | "model"
+export type AttemptOutcome = "passed" | "failed" | "rejected" | "repeated"
+
+export type RunAttempt = {
+  number: number
+  source: AttemptSource
+  origin: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  saved_tokens: number
+  outcome: AttemptOutcome
+  explanation: string
+  problem: string
+  tests: RunOfTests | null
+  edits: Edit[]
+  edits_cut: boolean
+}
+
+/** A run of healer run, step by step, from /api/runs/<run_id>. */
+export type Run = {
+  run_id: string
+  project: string
+  recorded_at: string
+  command: string
+  status: RepairStatus
+  detail: string
+  error: string
+  error_type: string
+  location: string
+  signature: string
+  baseline: RunOfTests
+  attempts: RunAttempt[]
+  applied: boolean | null
+  shared: "sent" | "waiting" | "failed" | "off" | null
+  results_told: number
 }

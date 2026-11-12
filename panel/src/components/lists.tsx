@@ -5,12 +5,16 @@ import {
   Bug01Icon,
   Folder01Icon,
   InboxIcon,
+  ListViewIcon,
   UserGroupIcon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
+import { Fragment, useState } from "react"
 
 import { exitCode, FixCard } from "@/components/fixes"
+import { RunSteps } from "@/components/run"
 import { EmptyState, SectionTitle } from "@/components/section"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   Table,
@@ -36,13 +40,14 @@ import {
 import type { Incident, Project, TeamFix, WaitingFix } from "@/lib/types"
 
 export function Incidents({ incidents, now }: { incidents: Incident[]; now: Date }) {
+  const [opened, setOpened] = useState<string | null>(null)
   return (
     <section className="flex flex-col gap-4">
       <SectionTitle
         icon={Bug01Icon}
         tint="rose"
         title="Incidents"
-        description="The latest runs of healer run that had something to fix, newest first. Only metrics are kept: never code or logs."
+        description="The latest runs of healer run that had something to fix, newest first. Steps opens a run from the failing tests to its fix, with each attempt and its change, redacted."
       />
       {incidents.length ? (
         <Card size="sm">
@@ -58,42 +63,70 @@ export function Incidents({ incidents, now }: { incidents: Incident[]; now: Date
                   <TableHead className="text-right">Calls to Claude</TableHead>
                   <TableHead className="text-right">Tokens spent</TableHead>
                   <TableHead className="text-right">Tokens saved</TableHead>
+                  <TableHead className="text-right">Steps</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {incidents.map((incident, index) => (
-                  <TableRow key={`${incident.recorded_at}-${index}`}>
-                    <TableCell title={formatMoment(incident.recorded_at)}>
-                      {timeAgo(incident.recorded_at, now)}
-                    </TableCell>
-                    <TableCell title={incident.project}>{projectName(incident.project)}</TableCell>
-                    <TableCell>
-                      <span className="font-mono text-xs">{incident.error_type}</span>{" "}
-                      <span className="text-xs text-muted-foreground">
-                        {shortSignature(incident.signature)}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <span className="inline-flex items-center gap-2">
-                        <span
-                          className="size-2.5 rounded-[3px]"
-                          style={{ backgroundColor: LEVEL_COLORS[incident.resolution] }}
-                          aria-hidden
-                        />
-                        {RESOLUTION_LABELS[incident.resolution]}
-                      </span>
-                    </TableCell>
-                    <TableCell>{STATUS_LABELS[incident.status]}</TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatFull(incident.model_attempts)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatFull(incident.tokens_used)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatFull(incident.tokens_saved)}
-                    </TableCell>
-                  </TableRow>
+                  <Fragment key={`${incident.recorded_at}-${index}`}>
+                    <TableRow>
+                      <TableCell title={formatMoment(incident.recorded_at)}>
+                        {timeAgo(incident.recorded_at, now)}
+                      </TableCell>
+                      <TableCell title={incident.project}>
+                        {projectName(incident.project)}
+                      </TableCell>
+                      <TableCell>
+                        <span className="font-mono text-xs">{incident.error_type}</span>{" "}
+                        <span className="text-xs text-muted-foreground">
+                          {shortSignature(incident.signature)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="inline-flex items-center gap-2">
+                          <span
+                            className="size-2.5 rounded-[3px]"
+                            style={{ backgroundColor: LEVEL_COLORS[incident.resolution] }}
+                            aria-hidden
+                          />
+                          {RESOLUTION_LABELS[incident.resolution]}
+                        </span>
+                      </TableCell>
+                      <TableCell>{STATUS_LABELS[incident.status]}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatFull(incident.model_attempts)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatFull(incident.tokens_used)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatFull(incident.tokens_saved)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {incident.run_id ? (
+                          <StepsToggle
+                            open={opened === incident.run_id}
+                            onToggle={() =>
+                              setOpened(opened === incident.run_id ? null : incident.run_id)
+                            }
+                          />
+                        ) : (
+                          <span className="text-xs text-muted-foreground" title="Not kept">
+                            –
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                    {incident.run_id && opened === incident.run_id ? (
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell colSpan={9} className="whitespace-normal">
+                          <div className="py-2">
+                            <RunSteps id={incident.run_id} />
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
+                  </Fragment>
                 ))}
               </TableBody>
             </Table>
@@ -221,6 +254,15 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
         </EmptyState>
       )}
     </section>
+  )
+}
+
+function StepsToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <Button variant="secondary" size="sm" onClick={onToggle} aria-expanded={open}>
+      <HugeiconsIcon icon={ListViewIcon} strokeWidth={2} aria-hidden />
+      {open ? "Hide" : "Show"}
+    </Button>
   )
 }
 

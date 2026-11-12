@@ -151,9 +151,12 @@ class RepairPipeline:
             attempts=state["attempts"],
             stored=state.get("stored", False),
             solution=state.get("solution"),
+            project=self._project,
         )
-        entry = ledger_entry(result, project=self._project, at=self._clock())
+        at = self._clock()
+        entry = ledger_entry(result, project=self._project, at=at)
         if entry is not None:
+            result = result.model_copy(update={"recorded_at": at})
             try:
                 self._ledger.record(entry)
             except HealerError as exc:

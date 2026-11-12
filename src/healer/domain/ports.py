@@ -7,6 +7,7 @@ from typing import Protocol
 
 from healer.domain.diagnosis import TracedError
 from healer.domain.execution import RunResult
+from healer.domain.history import RunRecord
 from healer.domain.ledger import LedgerEntry
 from healer.domain.listener import ListenerStatus
 from healer.domain.models import FileMap, SearchHit, SourceFile, Symbol
@@ -191,6 +192,23 @@ class ShareOutbox(Protocol):
 
     def clear(self) -> int:
         """Forget every fix and result waiting and return how many there were."""
+        ...
+
+
+class RunHistory(Protocol):
+    """The runs of ``healer run`` this node kept, step by step (ADR 0023)."""
+
+    def keep(self, record: RunRecord) -> None:
+        """Store ``record``, replacing one with the same id, and forget the oldest runs
+        beyond the limit. Raise ``HistoryError`` if it cannot be stored."""
+        ...
+
+    def get(self, run_id: str) -> RunRecord | None:
+        """Return the run with that id, or None."""
+        ...
+
+    def known(self, run_ids: Iterable[str]) -> set[str]:
+        """Return which of ``run_ids`` are kept."""
         ...
 
 

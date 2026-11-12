@@ -8,6 +8,7 @@ from healer.domain.panel import (
     CheckState,
     DiffLine,
     PanelSnapshot,
+    RunView,
     activity,
     daily_tokens,
     edit_view,
@@ -28,6 +29,7 @@ from healer.domain.solution import Solution
 
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=UTC)
 FIXTURE = Path(__file__).parents[2] / "panel" / "src" / "lib" / "fixtures" / "snapshot.json"
+RUN_FIXTURE = FIXTURE.with_name("run.json")
 
 
 def entry(
@@ -197,6 +199,14 @@ def test_the_panel_sample_matches_the_snapshot_the_server_sends() -> None:
     raw = json.loads(FIXTURE.read_text())
     snapshot = PanelSnapshot.model_validate(raw)
     assert json.loads(snapshot.model_dump_json()) == raw
+
+
+def test_the_run_sample_matches_the_run_the_server_sends() -> None:
+    raw = json.loads(RUN_FIXTURE.read_text())
+    run = RunView.model_validate(raw)
+    assert json.loads(run.model_dump_json()) == raw
+    first = PanelSnapshot.model_validate(json.loads(FIXTURE.read_text())).incidents[0]
+    assert first.run_id == run.run_id
 
 
 def test_recent_activity_mixes_every_source_newest_first() -> None:

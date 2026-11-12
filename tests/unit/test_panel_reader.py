@@ -1,15 +1,23 @@
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from healer.domain.errors import LedgerError, OutboxError, SharingError, StatusError
+from healer.domain.errors import (
+    HistoryError,
+    LedgerError,
+    OutboxError,
+    SharingError,
+    StatusError,
+)
+from healer.domain.history import AttemptRecord, RunOfTests, RunRecord, run_id
 from healer.domain.ledger import LedgerEntry, Resolution
 from healer.domain.listener import ListenerStatus
 from healer.domain.panel import Check, CheckState
 from healer.domain.patch import FileEdit, Patch
 from healer.domain.proposal import TokenUsage
-from healer.domain.repair import RepairStatus
+from healer.domain.repair import AttemptOutcome, AttemptSource, RepairStatus
 from healer.domain.sharing import (
     Evidence,
     FixResult,
@@ -167,6 +175,57 @@ def an_entry(project: str = "/workspace/shop") -> LedgerEntry:
     )
 
 
+class FakeHistory:
+    """Runs kept by id; ``error`` makes every read fail."""
+
+    def __init__(self, *runs: RunRecord, error: Exception | None = None) -> None:
+        self.runs = {run.run_id: run for run in runs}
+        self.error = error
+
+    def keep(self, record: RunRecord) -> None:
+        raise AssertionError("the panel only reads")
+
+    def get(self, identifier: str) -> RunRecord | None:
+        if self.error is not None:
+            raise self.error
+        return self.runs.get(identifier)
+
+    def known(self, identifiers: Iterable[str]) -> set[str]:
+        if self.error is not None:
+            raise self.error
+        return set(identifiers) & set(self.runs)
+
+
+def kept_run(entry: LedgerEntry) -> RunRecord:
+    return RunRecord(
+        run_id=run_id(entry.project, entry.recorded_at),
+        project=entry.project,
+        recorded_at=entry.recorded_at,
+        command="python -m pytest",
+        status=entry.status,
+        error="KeyError: 'db'",
+        error_type=entry.error_type,
+        signature=entry.signature,
+        baseline=RunOfTests(exit_code=1, duration_seconds=1.0, passed=False),
+        attempts=(
+            AttemptRecord(
+                number=1,
+                source=AttemptSource.MODEL,
+                model="claude-sonnet-5-5",
+                input_tokens=90,
+                output_tokens=10,
+                saved_tokens=0,
+                outcome=AttemptOutcome.PASSED,
+                explanation="Use a default.",
+                tests=RunOfTests(exit_code=0, duration_seconds=1.0, passed=True),
+                edits=(FileEdit(path="app.py", old="x = 1\ny = 2\n", new="x = 1\ny = 3\n"),),
+            ),
+        ),
+        applied=True,
+        shared="off",
+    )
+
+
 def reader(**overrides: object) -> PanelReader:
     parts: dict[str, object] = {
         "node": "laptop-luis",
@@ -176,6 +235,7 @@ def reader(**overrides: object) -> PanelReader:
         "outbox": FakeOutbox(),
         "projects": FakeProjects(),
         "results": FakeResults(),
+        "history": FakeHistory(),
         "listener": FakeStatus(),
         "clock": lambda: NOW,
     }
@@ -301,6 +361,33 @@ def test_a_section_that_cannot_be_read_is_empty_and_says_why() -> None:
     assert snapshot.projects == []
     assert snapshot.team[0].node == "laptop-ana"
     assert states(snapshot.checks) == {"listener": CheckState.FAIL, "outbox": CheckState.FAIL}
+
+
+def test_incidents_whose_run_is_kept_can_open_it_step_by_step() -> None:
+    shop, api = an_entry(), an_entry("/workspace/api")
+    panel = reader(ledger=FakeLedger([shop, api]), history=FakeHistory(kept_run(shop)))
+    snapshot = panel.snapshot()
+    by_project = {i.project: i.run_id for i in snapshot.incidents}
+    assert by_project == {
+        "/workspace/shop": run_id(shop.project, shop.recorded_at),
+        "/workspace/api": None,
+    }
+
+    run = panel.run(run_id(shop.project, shop.recorded_at))
+    assert run is not None
+    assert [(a.number, a.outcome) for a in run.attempts] == [(1, AttemptOutcome.PASSED)]
+    assert [line.kind for line in run.attempts[0].edits[0].lines] == ["context", "removed", "added"]
+    assert panel.run("f" * 16) is None
+
+
+def test_a_history_that_cannot_be_read_hides_only_the_runs() -> None:
+    panel = reader(history=FakeHistory(error=HistoryError("Cannot use the history")))
+    snapshot = panel.snapshot()
+    assert snapshot.problems == {"history": "Cannot use the history"}
+    assert len(snapshot.incidents) == 2
+    assert all(incident.run_id is None for incident in snapshot.incidents)
+    with pytest.raises(HistoryError):
+        panel.run("f" * 16)
 
 
 def test_an_unexpected_error_is_shown_and_logged_not_hidden(

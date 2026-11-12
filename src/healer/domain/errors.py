@@ -75,6 +75,10 @@ class OutboxError(HealerError):
     """The fixes waiting to be sent could not be read or written."""
 
 
+class HistoryError(HealerError):
+    """The history of the runs could not be read or written."""
+
+
 class ResultsError(HealerError):
     """The results of the team's fixes could not be read or written."""
 
