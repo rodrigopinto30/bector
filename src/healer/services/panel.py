@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TypeVar
 
+from healer import __version__
 from healer.domain.errors import HealerError
 from healer.domain.history import run_id
 from healer.domain.ledger import LedgerEntry
@@ -132,6 +133,7 @@ class PanelReader:
         summary: Savings = savings(entries, today=now.astimezone(UTC).date())
         return PanelSnapshot(
             taken_at=now,
+            version=__version__,
             node=self._node,
             topic=self._topic,
             sharing=self._sharing,

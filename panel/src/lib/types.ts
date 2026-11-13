@@ -156,6 +156,8 @@ export type ActivityItem = {
 
 export type Snapshot = {
   taken_at: string
+  /** The version of healer this node runs. */
+  version: string
   node: string
   topic: string
   sharing: boolean

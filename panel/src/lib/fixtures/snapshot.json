@@ -1,5 +1,6 @@
 {
   "taken_at": "2026-11-09T15:00:00Z",
+  "version": "1.0.0",
   "node": "laptop-luis",
   "topic": "healer/solutions/v1",
   "sharing": true,

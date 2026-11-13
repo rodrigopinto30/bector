@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from healer import __version__
 from healer.domain.errors import (
     HistoryError,
     LedgerError,
@@ -250,7 +251,7 @@ def states(snapshot_checks: list[Check]) -> dict[str, CheckState]:
 def test_a_snapshot_gathers_every_section() -> None:
     snapshot = reader().snapshot()
     assert (snapshot.node, snapshot.topic, snapshot.sharing) == ("laptop-luis", TOPIC, True)
-    assert snapshot.taken_at == NOW
+    assert (snapshot.taken_at, snapshot.version) == (NOW, __version__)
     assert snapshot.problems == {}
     assert snapshot.savings.total.incidents == 2
     assert snapshot.savings.days[-1].spent == 200
