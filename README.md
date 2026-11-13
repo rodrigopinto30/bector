@@ -100,7 +100,7 @@ To stop everything:
 | `sandbox` | `healer-sandbox` | Runs the tests of each copy, with no network, no secrets and no access to your files. |
 | `mosquitto` | `healer-mosquitto` | MQTT broker used to share solutions between machines. Only the nodes added with `./broker.sh` can connect. |
 | `listener` | `healer-listener` | Optional. Runs `healer listen` in the background; it only starts with the `team` profile. |
-| `panel` | `healer-panel` | The panel at http://localhost:8765, for this computer only. It only reads. |
+| `panel` | `healer-panel` | The panel at http://localhost:8765, for this computer only. It can send or discard what waits in the outbox and forget a suggestion, never touch your project. |
 
 In `docker compose exec cli healer doctor`, `cli` is the service and `healer doctor` is the command that runs inside it. If you get `service "healer" is not running`, the command is from before the service was renamed to `cli`; `./stop.sh` also removes the old container.
 
@@ -156,7 +156,7 @@ Run each one inside the container, as `docker compose exec cli healer <command>`
 | `propose [LOG]` | Asks Claude to fix one error from a log and tests the patch on a copy. |
 | `redact [FILE]` | Prints a text with its secrets hidden. |
 | `listen` | Receives the team's fixes and keeps them as suggestions, until stopped. |
-| `team` | Lists the suggestions received, with the nodes where each one worked or failed. |
+| `team` | Lists the suggestions received, with the nodes where each one worked or failed. `--forget FIX` never offers that one again. |
 | `outbox` | Lists the accepted fixes, and the results of the team's fixes, that the broker did not take. `--send` sends them now; `--discard` forgets them. |
 | `panel` | Serves the panel. The `panel` container already runs it at http://localhost:8765. |
 
@@ -607,12 +607,14 @@ Open **http://localhost:8765**. `./start.sh` starts the panel with the rest of t
 | **Overview** | The same checks as `healer doctor`, plus the node name, the team listener and the outbox. Beside them, the recent activity, newest first: incidents, fixes received or waiting, and what the listener saw, with each new event lit up for a moment. Then the savings: tokens saved and spent, a chart per day split by the source that solved each incident (local cache, team or Claude), and how many incidents each source solved. Each chart can be shown as a table. |
 | **Incidents** | The last 50 incidents: when, which project, the error, what solved it and what it cost. **Show**, under Steps, opens the run step by step: the failing tests, each attempt with its source, its change and what the tests said, how it ended, and whether the fix was applied and shared. |
 | **Projects** | For each project: how many symbols its index has, its incidents, and the fixes it keeps, each with its explanation, its evidence and the change, line by line. |
-| **Team** | The suggestions received from other nodes, with the node that sent them, the change, and the nodes where it worked or failed. An error with several fixes says in which order `healer run` tries them. |
-| **Outbox** | The fixes waiting to be sent, with their attempts and the last error. The Outbox card also counts the results waiting. |
+| **Team** | The suggestions received from other nodes, with the node that sent them, the change, and the nodes where it worked or failed. An error with several fixes says in which order `healer run` tries them. **Forget** drops a suggestion: it is never offered or kept again. |
+| **Outbox** | The fixes waiting to be sent, with their attempts and the last error. The Outbox card also counts the results waiting. **Send now** tries to send everything waiting, and **Discard** drops one fix. |
 
 Each tab has its own address, such as http://localhost:8765/#incidents, so it can be bookmarked.
 
-- **It only reads.** It has no button that changes anything: fixes are still accepted, sent or discarded with the commands. Its container gets the code and the data volume read only, and never sees the workspace.
+- **Its actions touch only this node's data.** **Send now** and **Discard** in the Outbox tab, and **Forget** in the Team tab. Each asks first, says what it did, and shows up in the recent activity. Applying a fix stays in the terminal: the panel's container never sees the workspace, and gets the code and the sandbox read only.
+- **Only its own pages can act.** An action is a POST to `/api/actions/...`. It must come from a page of this panel (its Origin), be JSON, and carry the token of this panel's session, which `/api/session` gives only to pages of this computer. A page of another site fails all three, so it can neither read nor change anything. The token changes each time the panel starts.
+- **Forgetting does not write the Chroma database.** The fix is listed as forgotten, next to the results of the team's fixes, and is never offered again. `healer listen`, which writes the team's collection, drops it from there when the next fix for that error arrives, and ignores it if it is sent again.
 - **Only this computer can open it.** The port is published on `127.0.0.1` only, and the panel answers only to the names `localhost`, `127.0.0.1` and `[::1]`. A web page from another site that makes its own name point to `127.0.0.1` (DNS rebinding) gets a refusal. Each page may run only its own scripts and ask only this server for data.
 - **A part that cannot be read does not hide the rest.** If, for example, the ledger is corrupt, the panel says so above the tabs and shows everything else.
 - **Each run, step by step.** `healer run` keeps the steps of each incident in a SQLite file (`HISTORY_PATH`, `/data/healer/history.sqlite3`): the error and where it comes from, each attempt (local cache, team or Claude) with its explanation, its edits and the errors its tests showed, the verdict, and whether the fix was applied and shared. Everything is redacted before it is stored, texts are cut to 2,000 characters, and an attempt's edits to 20,000. The raw output of the tests is never kept. Only the latest `HISTORY_MAX_RUNS` (200) are kept. Nothing of it leaves the machine: the panel asks for one run, at `/api/runs/<id>`, only when it is opened. Runs from before this history have no steps.
