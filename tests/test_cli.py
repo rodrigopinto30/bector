@@ -966,6 +966,36 @@ def test_outbox_lists_the_results_waiting(monkeypatch: pytest.MonkeyPatch) -> No
     assert "discarded  1 result" in discarded.stdout
 
 
+def test_a_suggestion_can_be_forgotten_from_the_terminal(team_node: Callable[..., None]) -> None:
+    team_node(
+        FakeSubscriber(
+            team_message(new="first", hour=10),
+            team_message(new="second", node="laptop-eva", hour=11),
+        )
+    )
+    runner.invoke(cli.app, ["listen"])
+    shown = runner.invoke(cli.app, ["team"])
+    eva = fix_id("a" * 64, Patch(edits=(FileEdit(path="app/cfg.py", old='c["db"]', new="second"),)))
+    assert f"fix        {eva[:12]}" in shown.stdout
+
+    forgot = runner.invoke(cli.app, ["team", "--forget", eva[:12]])
+    assert forgot.exit_code == 0, forgot.output
+    assert "forgotten  the fix from laptop-eva for KeyError: 'db'" in forgot.stdout
+    after = runner.invoke(cli.app, ["team"])
+    assert "1 suggestion from the team for 1 error" in after.stdout
+    assert "laptop-eva" not in after.stdout
+
+    missing = runner.invoke(cli.app, ["team", "--forget", "ffffffff"])
+    assert missing.exit_code == 2
+    assert "no suggestion has a fix starting with ffffffff" in missing.output
+
+    team_node(FakeSubscriber(team_message(new="second", node="laptop-eva", hour=12)))
+    again = runner.invoke(cli.app, ["listen"])
+    assert "ignored    KeyError: 'db' from laptop-eva (1 file): forgotten on this node" in (
+        again.stdout
+    )
+
+
 def test_text_from_other_nodes_cannot_control_the_terminal(
     team_node: Callable[..., None],
 ) -> None:

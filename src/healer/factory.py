@@ -22,6 +22,8 @@ from healer.adapters.panel_server import LOCAL_HOSTS, PanelApp
 from healer.adapters.python_parser import PythonParser
 from healer.adapters.python_traceback import PythonTraceParser
 from healer.adapters.sandbox_client import SandboxServiceRunner
+from healer.adapters.sqlite_actions import SqliteActions
+from healer.adapters.sqlite_forgotten import SqliteForgotten
 from healer.adapters.sqlite_history import SqliteHistory
 from healer.adapters.sqlite_ledger import SqliteLedger
 from healer.adapters.sqlite_outbox import SqliteOutbox
@@ -45,6 +47,7 @@ from healer.services.diagnoser import Diagnoser
 from healer.services.fix_installer import FixInstaller
 from healer.services.fix_proposer import FixProposer
 from healer.services.panel import PanelReader, Probe
+from healer.services.panel_actions import PanelActions
 from healer.services.sandbox_runner import SandboxRunner
 from healer.services.solution_ingester import SolutionIngester
 from healer.services.solution_sharer import SolutionSharer
@@ -281,6 +284,7 @@ def build_suggestion_finder(
     return SuggestionFinder(
         build_team_solutions(settings, embedding_function),
         results=build_results(settings),
+        forgotten=build_forgotten(settings),
         max_distance=settings.team_max_distance,
         max_matches=settings.team_max_suggestions,
     )
@@ -293,6 +297,7 @@ def build_solution_ingester(
         build_team_solutions(settings, embedding_function),
         _patch_policy(settings),
         results=build_results(settings),
+        forgotten=build_forgotten(settings),
         node=settings.node_id,
         key=_team_key(settings),
         max_bytes=settings.max_share_bytes,
@@ -304,19 +309,36 @@ def build_listener_status(settings: Settings) -> JsonListenerStatus:
     return JsonListenerStatus(settings.listener_status_path)
 
 
-def build_panel_reader(
+def build_forgotten(settings: Settings) -> SqliteForgotten:
+    return SqliteForgotten(settings.results_path, settings.mqtt_topic)
+
+
+def build_action_log(settings: Settings) -> SqliteActions:
+    return SqliteActions(settings.history_path)
+
+
+def _panel_projects(
     settings: Settings, embedding_function: EmbeddingFunction[Any] | None = None
-) -> PanelReader:
-    """Reads what the other commands write. The broker is asked with a short timeout, so a
-    broker that is down never makes the panel wait long."""
+) -> ChromaPanelStore:
     client = chromadb.PersistentClient(path=str(settings.chroma_path))
-    projects = ChromaPanelStore(
+    return ChromaPanelStore(
         client,
         code_collection=lambda path: collection_name(Path(path)),
         fixes_collection=lambda path: collection_name(Path(path), "solutions"),
         team_collection=_team_collection(settings),
         embedding_function=embedding_function,
     )
+
+
+def build_panel_reader(
+    settings: Settings,
+    embedding_function: EmbeddingFunction[Any] | None = None,
+    *,
+    projects: ChromaPanelStore | None = None,
+) -> PanelReader:
+    """Reads what the other commands write. The broker is asked with a short timeout, so a
+    broker that is down never makes the panel wait long."""
+    projects = projects or _panel_projects(settings, embedding_function)
     quick = settings.model_copy(
         update={"mqtt_timeout_seconds": min(settings.mqtt_timeout_seconds, 3.0)}
     )
@@ -332,6 +354,8 @@ def build_panel_reader(
         projects=projects,
         results=build_results(settings),
         history=build_history(settings),
+        forgotten=build_forgotten(settings),
+        actions=build_action_log(settings),
         listener=build_listener_status(settings),
         checks=[
             Probe(
@@ -354,13 +378,34 @@ def build_panel_reader(
     )
 
 
-def build_panel_app(settings: Settings, *, extra_hosts: Iterable[str] = ()) -> PanelApp:
-    reader = build_panel_reader(settings)
+def build_panel_actions(
+    settings: Settings, projects: ChromaPanelStore | None = None
+) -> PanelActions:
+    """Without sharing on, the outbox can still be discarded from, but not sent."""
+    return PanelActions(
+        outbox=build_outbox(settings),
+        team=(projects or _panel_projects(settings)).team,
+        forgotten=build_forgotten(settings),
+        log=build_action_log(settings),
+        sharer=(lambda: build_solution_sharer(settings)) if settings.share_solutions else None,
+    )
+
+
+def build_panel_app(
+    settings: Settings,
+    *,
+    extra_hosts: Iterable[str] = (),
+    extra_origins: Iterable[str] = (),
+) -> PanelApp:
+    projects = _panel_projects(settings)
+    reader = build_panel_reader(settings, projects=projects)
     return PanelApp(
         reader.snapshot,
         settings.panel_pages,
         run=reader.run,
+        actions=build_panel_actions(settings, projects),
         allowed_hosts=LOCAL_HOSTS | {host.lower() for host in extra_hosts},
+        allowed_origins=frozenset(origin.lower().rstrip("/") for origin in extra_origins),
     )
 
 

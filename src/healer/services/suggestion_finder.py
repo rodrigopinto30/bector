@@ -1,7 +1,7 @@
 """Use case: find what the team already has for an error (6.1)."""
 
 from healer.domain.diagnosis import Diagnosis
-from healer.domain.ports import ResultStore, TeamSolutionRepository
+from healer.domain.ports import ForgottenFixes, ResultStore, TeamSolutionRepository
 from healer.domain.ranking import NO_RESULTS, Tally, ranked
 from healer.domain.sharing import TeamMatch
 
@@ -16,7 +16,8 @@ class SuggestionFinder:
     Matching by meaning alone is too loose: a ``KeyError`` reads close to a
     ``ConnectionError`` that mentions the same word. So a similar error must also be of the
     same type and within ``max_distance``, because a wrong suggestion costs more than none.
-    Each match carries how many nodes it worked on and failed on.
+    Each match carries how many nodes it worked on and failed on. A fix this node forgot is
+    never offered.
     """
 
     def __init__(
@@ -24,11 +25,13 @@ class SuggestionFinder:
         store: TeamSolutionRepository,
         *,
         results: ResultStore,
+        forgotten: ForgottenFixes,
         max_distance: float,
         max_matches: int,
     ) -> None:
         self._store = store
         self._results = results
+        self._forgotten = forgotten
         self._max_distance = max_distance
         self._max_matches = max_matches
 
@@ -46,9 +49,11 @@ class SuggestionFinder:
             and match.distance <= self._max_distance
             and match.received.solution.error.split(":", 1)[0].strip() == target.error.error_type
         ]
-        tallies = self._results.tally(
-            [r.solution.fix_id for r in same] + [m.received.solution.fix_id for m in nearby]
-        )
+        found = [r.solution.fix_id for r in same] + [m.received.solution.fix_id for m in nearby]
+        left_out = self._forgotten.forgotten(found)
+        same = [r for r in same if r.solution.fix_id not in left_out]
+        nearby = [m for m in nearby if m.received.solution.fix_id not in left_out]
+        tallies = self._results.tally(found)
         matches = [
             TeamMatch(received=received, distance=0, same_signature=True)
             for received in ranked(same, tallies)

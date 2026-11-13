@@ -96,9 +96,9 @@ services:
     profiles: ["team"]
     command: ["healer", "listen"]
 
-  # The local panel, at http://localhost:8765 (PANEL_PORT) and for this computer only. It
-  # only reads: the code and the data it does not need to write are mounted read only, and
-  # it never sees the workspace.
+  # The local panel, at http://localhost:8765 (PANEL_PORT) and for this computer only. Its
+  # only writes are the actions of its own pages on this node's data (ADR 0025): the code
+  # and the sandbox are mounted read only, and it never sees the workspace.
   panel:
     <<: *healer
     container_name: healer-panel
@@ -111,7 +111,7 @@ services:
     volumes:
       - .:/app:ro
       - chroma-data:/data/chroma
-      - healer-data:/data/healer:ro
+      - healer-data:/data/healer
       - sandbox-work:/sandbox:ro
     working_dir: /app
     read_only: true

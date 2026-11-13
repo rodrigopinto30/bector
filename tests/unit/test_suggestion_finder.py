@@ -10,7 +10,7 @@ from healer.domain.sharing import (
     TeamMatch,
 )
 from healer.services.suggestion_finder import SuggestionFinder
-from tests.conftest import FakeResults
+from tests.conftest import FakeForgotten, FakeResults
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 SIGNATURE = "a" * 64
@@ -62,11 +62,15 @@ class FakeStore:
 
 
 def finder(
-    store: FakeStore, max_matches: int = 3, results: FakeResults | None = None
+    store: FakeStore,
+    max_matches: int = 3,
+    results: FakeResults | None = None,
+    forgotten: FakeForgotten | None = None,
 ) -> SuggestionFinder:
     return SuggestionFinder(
         store,  # type: ignore[arg-type]
         results=results if results is not None else FakeResults(),
+        forgotten=forgotten if forgotten is not None else FakeForgotten(),
         max_distance=0.1,
         max_matches=max_matches,
     )
@@ -150,3 +154,11 @@ def test_at_most_the_limit_is_returned_and_the_search_looks_further() -> None:
     matches = finder(store, max_matches=2).find(TARGET)
     assert [m.received.solution.signature for m in matches] == [SIGNATURE, "e" * 64]
     assert store.limits == [6]
+
+
+def test_a_forgotten_fix_is_never_offered() -> None:
+    kept, dropped = received(SIGNATURE, new="kept"), received(SIGNATURE, new="dropped")
+    nearby = near("b" * 64)
+    forgotten = FakeForgotten(dropped.solution.fix_id, nearby.received.solution.fix_id)
+    matches = finder(FakeStore((kept, dropped), (nearby,)), forgotten=forgotten).find(TARGET)
+    assert [m.received for m in matches] == [kept]

@@ -8,6 +8,7 @@ import {
   InboxIcon,
   MinusSignCircleIcon,
   Notification03Icon,
+  TaskDone01Icon,
   UserGroupIcon,
   Wifi01Icon,
 } from "@hugeicons/core-free-icons"
@@ -29,6 +30,7 @@ const LOOKS: Record<ActivityItem["kind"], { icon: IconSvgElement; tint: Tint }> 
   ignored: { icon: MinusSignCircleIcon, tint: "butter" },
   rejected: { icon: CancelCircleIcon, tint: "rose" },
   result: { icon: CheckmarkCircle02Icon, tint: "mint" },
+  action: { icon: TaskDone01Icon, tint: "butter" },
 }
 
 const STATE_WORDS: Record<ActivityItem["state"], string> = {

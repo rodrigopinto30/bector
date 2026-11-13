@@ -24,7 +24,7 @@ from healer.domain.sharing import Evidence, ReceivedSolution, SharedSolution, Te
 from healer.domain.solution import Solution
 from healer.pipeline.repair import RepairPipeline
 from healer.services.suggestion_finder import SuggestionFinder
-from tests.conftest import FakeResults
+from tests.conftest import FakeForgotten, FakeResults
 
 
 def diagnosis(error_type: str, message: str, line: int = 2) -> Diagnosis:
@@ -243,6 +243,7 @@ def build(
         suggestions=SuggestionFinder(
             team if team is not None else FakeTeam(),
             results=FakeResults(),
+            forgotten=FakeForgotten(),
             max_distance=0.1,
             max_matches=3,
         ),

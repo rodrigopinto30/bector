@@ -135,6 +135,8 @@ export type TeamFix = {
 }
 
 export type WaitingFix = {
+  /** One per fix; several fixes for one error may wait. */
+  fix_id: string
   signature: string
   error: string
   topic: string
@@ -148,7 +150,15 @@ export type WaitingFix = {
 
 export type ActivityItem = {
   at: string
-  kind: "incident" | "suggestion" | "waiting" | "connection" | "ignored" | "rejected" | "result"
+  kind:
+    | "incident"
+    | "suggestion"
+    | "waiting"
+    | "connection"
+    | "ignored"
+    | "rejected"
+    | "result"
+    | "action"
   state: CheckState
   title: string
   detail: string
@@ -218,4 +228,16 @@ export type Run = {
   applied: boolean | null
   shared: "sent" | "waiting" | "failed" | "off" | null
   results_told: number
+}
+
+/** From /api/session: the token every action carries, when the panel takes actions. */
+export type Session = {
+  token: string | null
+  actions: boolean
+}
+
+/** What the panel says after an action. */
+export type ActionOutcome = {
+  ok: boolean
+  message: string
 }

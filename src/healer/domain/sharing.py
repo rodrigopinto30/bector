@@ -197,6 +197,8 @@ class IngestOutcome(StrEnum):
     """The same edits for the same error were already kept."""
     OUTRANKED = "outranked"
     """Not kept: the error has as many fixes as allowed, all of them ranked higher."""
+    FORGOTTEN = "forgotten"
+    """Not kept: this node chose to forget this fix (ADR 0025)."""
     OWN = "own"
 
 

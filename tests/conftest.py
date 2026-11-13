@@ -1,12 +1,14 @@
 import hashlib
 import re
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 
+from healer.domain.actions import PanelAction
 from healer.domain.models import SourceFile
 from healer.domain.ranking import Tally
 from healer.domain.sharing import FixResult
@@ -69,6 +71,32 @@ class FakeResults:
                     worked=tally.worked + result.worked, failed=tally.failed + (not result.worked)
                 )
         return tallies
+
+
+class FakeForgotten:
+    """``ForgottenFixes`` in memory."""
+
+    def __init__(self, *fixes: str) -> None:
+        self.fixes = set(fixes)
+
+    def forget(self, fix: str, signature: str, at: datetime) -> None:
+        self.fixes.add(fix)
+
+    def forgotten(self, fix_ids: Iterable[str]) -> set[str]:
+        return set(fix_ids) & self.fixes
+
+
+class FakeActionLog:
+    """``ActionLog`` in memory, newest first."""
+
+    def __init__(self) -> None:
+        self.actions: list[PanelAction] = []
+
+    def record(self, action: PanelAction) -> None:
+        self.actions.insert(0, action)
+
+    def recent(self, limit: int) -> list[PanelAction]:
+        return self.actions[:limit]
 
 
 @pytest.fixture(autouse=True)

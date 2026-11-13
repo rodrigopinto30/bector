@@ -591,6 +591,7 @@
   ],
   "outbox": [
     {
+      "fix_id": "62e8a62ca6027e03b5b00a72c36b68f89abecf03115d5ee2534b0e6425514b44",
       "signature": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "error": "AttributeError: 'NoneType' object has no attribute 'email' in notify (shop/mail.py)",
       "topic": "healer/solutions/v1",
@@ -628,6 +629,13 @@
       "state": "fail",
       "title": "Message rejected",
       "detail": "the signature does not match: forged or altered message"
+    },
+    {
+      "at": "2026-11-09T14:08:00Z",
+      "kind": "action",
+      "state": "ok",
+      "title": "Suggestion forgotten",
+      "detail": "ZeroDivisionError: division by zero in average (billing/totals.py), from laptop-eva"
     },
     {
       "at": "2026-11-09T14:05:00Z",
@@ -698,13 +706,6 @@
       "state": "ok",
       "title": "TypeError fixed in billing-api",
       "detail": "by the local cache, 0 tokens spent, 6,100 saved"
-    },
-    {
-      "at": "2026-11-05T13:00:00Z",
-      "kind": "incident",
-      "state": "ok",
-      "title": "AttributeError fixed in shop",
-      "detail": "by Claude, 15,200 tokens spent"
     }
   ],
   "problems": {}

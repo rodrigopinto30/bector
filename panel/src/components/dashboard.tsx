@@ -3,7 +3,7 @@
 import { Alert02Icon, Leaf01Icon, RefreshIcon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { cn } from "cn"
-import { useSyncExternalStore } from "react"
+import { useEffect, useState, useSyncExternalStore } from "react"
 
 import { Activity } from "@/components/activity"
 import { Health } from "@/components/health"
@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useSnapshot } from "@/hooks/use-snapshot"
+import { getSession } from "@/lib/actions"
 import { formatMoment, timeAgo } from "@/lib/format"
 import type { Snapshot } from "@/lib/types"
 
@@ -71,7 +72,7 @@ export function Dashboard() {
       ) : null}
       {snapshot ? (
         <div className={cn("transition-opacity", error && "opacity-70")}>
-          <Content snapshot={snapshot} />
+          <Content snapshot={snapshot} refresh={refresh} />
         </div>
       ) : error ? null : (
         <Loading />
@@ -136,7 +137,23 @@ function Header({
   )
 }
 
-function Content({ snapshot }: { snapshot: Snapshot }) {
+/** Whether this panel takes actions, as its server says once per page. */
+function useActions(): boolean {
+  const [enabled, setEnabled] = useState(false)
+  useEffect(() => {
+    let live = true
+    getSession()
+      .then((session) => live && setEnabled(session.actions))
+      .catch(() => live && setEnabled(false))
+    return () => {
+      live = false
+    }
+  }, [])
+  return enabled
+}
+
+function Content({ snapshot, refresh }: { snapshot: Snapshot; refresh: () => void }) {
+  const actions = useActions()
   const now = new Date(snapshot.taken_at)
   const problems = Object.entries(snapshot.problems)
   const fixes = snapshot.projects.reduce((sum, project) => sum + project.fixes.length, 0)
@@ -183,10 +200,22 @@ function Content({ snapshot }: { snapshot: Snapshot }) {
           <Projects projects={snapshot.projects} now={now} />
         </TabsContent>
         <TabsContent value="team">
-          <Team team={snapshot.team} sharing={snapshot.sharing} now={now} />
+          <Team
+            team={snapshot.team}
+            sharing={snapshot.sharing}
+            now={now}
+            actions={actions}
+            onChanged={refresh}
+          />
         </TabsContent>
         <TabsContent value="outbox">
-          <Outbox outbox={snapshot.outbox} now={now} />
+          <Outbox
+            outbox={snapshot.outbox}
+            now={now}
+            sharing={snapshot.sharing}
+            actions={actions}
+            onChanged={refresh}
+          />
         </TabsContent>
       </Tabs>
     </div>
