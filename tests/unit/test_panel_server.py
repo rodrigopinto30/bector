@@ -27,6 +27,7 @@ PAGE = (
 def snapshot() -> PanelSnapshot:
     return PanelSnapshot(
         taken_at=NOW,
+        version="1.0.0",
         node="laptop-luis",
         topic="healer/solutions/v1",
         sharing=False,

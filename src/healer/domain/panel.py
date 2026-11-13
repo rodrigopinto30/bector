@@ -193,6 +193,7 @@ class PanelSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     taken_at: datetime
+    version: str = Field(description="The version of healer this node runs.")
     node: str
     topic: str
     sharing: bool

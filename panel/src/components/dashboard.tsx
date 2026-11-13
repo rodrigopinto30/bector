@@ -96,7 +96,14 @@ function Header({
     <header className="flex flex-wrap items-center gap-3">
       <IconBubble icon={Leaf01Icon} tint="mint" className="size-11 rounded-3xl" />
       <div className="min-w-0 flex-1">
-        <h1 className="font-heading text-2xl font-extrabold tracking-tight">Healer</h1>
+        <h1 className="flex items-baseline gap-2 font-heading text-2xl font-extrabold tracking-tight">
+          Healer
+          {snapshot ? (
+            <span className="font-sans text-xs font-medium tracking-normal text-muted-foreground">
+              {snapshot.version}
+            </span>
+          ) : null}
+        </h1>
         <p className="truncate text-sm text-muted-foreground">
           {snapshot ? (
             <>
