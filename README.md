@@ -12,6 +12,8 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
+Version **1.0.0**, the first release. `CHANGELOG.md` lists what each version adds, how to upgrade and which versions work together in a team.
+
 All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. Every pull request is checked by a CI pipeline, and every commit by a local pre-commit check. A local panel shows all of it in the browser.
 
 | Phase | What it delivers | Status |
@@ -122,6 +124,17 @@ Put your project in `workspace/`. To let Claude write fixes, open `.env`, set `A
 docker compose exec cli healer run        # find a fix, test it on a copy, ask before applying it
 docker compose exec cli healer savings    # tokens spent and saved
 ```
+
+### Update to a new version
+
+```bash
+git pull
+./stop.sh && ./start.sh
+docker compose --profile team up -d listener   # only if you run the team listener
+docker compose exec cli healer version
+```
+
+The data in the volumes is kept: a new version reads what an older one wrote, and converts it on its own when needed. `./stop.sh` also stops the team listener, and `./start.sh` does not start it again. Each version's entry in `CHANGELOG.md` says whether anything else is needed and which versions can share fixes.
 
 ## Commands
 
