@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from healer import __version__
+from healer.domain.actions import ActionKind, PanelAction
 from healer.domain.errors import (
     HistoryError,
     LedgerError,
@@ -29,7 +30,7 @@ from healer.domain.sharing import (
 )
 from healer.domain.solution import Solution
 from healer.services.panel import PanelReader, Probe
-from tests.conftest import FakeResults
+from tests.conftest import FakeActionLog, FakeForgotten, FakeResults
 
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=UTC)
 TOPIC = "healer/solutions/v1"
@@ -237,6 +238,8 @@ def reader(**overrides: object) -> PanelReader:
         "projects": FakeProjects(),
         "results": FakeResults(),
         "history": FakeHistory(),
+        "forgotten": FakeForgotten(),
+        "actions": FakeActionLog(),
         "listener": FakeStatus(),
         "clock": lambda: NOW,
     }
@@ -389,6 +392,27 @@ def test_a_history_that_cannot_be_read_hides_only_the_runs() -> None:
     assert all(incident.run_id is None for incident in snapshot.incidents)
     with pytest.raises(HistoryError):
         panel.run("f" * 16)
+
+
+def test_forgotten_suggestions_are_left_out_and_actions_show_in_the_activity() -> None:
+    first = received_fix("laptop-ana", 'c.get("db", "x")')
+    second = received_fix("laptop-eva", 'c.get("db")')
+    log = FakeActionLog()
+    log.record(
+        PanelAction(
+            at=NOW - timedelta(minutes=1),
+            kind=ActionKind.FORGET,
+            title="Suggestion forgotten",
+            detail="KeyError: 'db', from laptop-eva",
+        )
+    )
+    snapshot = reader(
+        projects=FakeProjects(team=[second, first]),
+        forgotten=FakeForgotten(second.solution.fix_id),
+        actions=log,
+    ).snapshot()
+    assert [(t.node, t.fixes_for_error) for t in snapshot.team] == [("laptop-ana", 1)]
+    assert ("action", "Suggestion forgotten") in [(a.kind, a.title) for a in snapshot.activity]
 
 
 def test_an_unexpected_error_is_shown_and_logged_not_hidden(

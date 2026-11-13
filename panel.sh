@@ -82,7 +82,8 @@ case "${1:-}" in
     api="healer-panel-dev-api"
     $DOCKER rm -f "$api" >/dev/null 2>&1 || true
     $DOCKER compose run --rm -d --no-deps --name "$api" panel \
-      healer panel --host 0.0.0.0 --port 8765 --allow-host "$api" >/dev/null
+      healer panel --host 0.0.0.0 --port 8765 --allow-host "$api" \
+      --allow-origin http://localhost:3000 >/dev/null
     trap '$DOCKER stop "$api" >/dev/null 2>&1 || true' EXIT
     echo "[panel] Open http://localhost:3000; stop with Ctrl+C."
     in_node -it --network "$network" -p 127.0.0.1:3000:3000 -e "PANEL_API=http://$api:8765" \

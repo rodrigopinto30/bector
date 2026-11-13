@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from healer.domain.errors import InvalidPatchError, RejectedMessageError
 from healer.domain.patch import PatchPolicy
-from healer.domain.ports import ResultStore, TeamSolutionRepository
+from healer.domain.ports import ForgottenFixes, ResultStore, TeamSolutionRepository
 from healer.domain.ranking import rank_key
 from healer.domain.sharing import (
     FixResult,
@@ -36,7 +36,9 @@ class SolutionIngester:
     messages cannot push out newer fixes.
 
     A result counts one vote per node and fix, its latest, and only for a fix kept here.
-    A node ignores its own messages. Nothing here applies or tests a patch.
+    A fix this node forgot is never kept again, and is dropped from the store the next time
+    a fix for its error arrives (ADR 0025). A node ignores its own messages. Nothing here
+    applies or tests a patch.
     """
 
     def __init__(
@@ -45,6 +47,7 @@ class SolutionIngester:
         policy: PatchPolicy,
         *,
         results: ResultStore,
+        forgotten: ForgottenFixes,
         node: str,
         key: bytes,
         max_bytes: int,
@@ -57,6 +60,7 @@ class SolutionIngester:
         self._store = store
         self._policy = policy
         self._results = results
+        self._forgotten = forgotten
         self._node = node
         self._key = key
         self._max_bytes = max_bytes
@@ -75,7 +79,9 @@ class SolutionIngester:
         self._check(solution)
         if solution.node == self._node:
             return Ingested(outcome=IngestOutcome.OWN, solution=solution)
-        known = self._store.for_signature(solution.signature)
+        if self._forgotten.forgotten([solution.fix_id]):
+            return Ingested(outcome=IngestOutcome.FORGOTTEN, solution=solution)
+        known = self._without_forgotten(self._store.for_signature(solution.signature))
         if any(k.solution.patch.edits == solution.patch.edits for k in known):
             return Ingested(outcome=IngestOutcome.DUPLICATE, solution=solution)
         arrived = ReceivedSolution(solution=solution, received_at=self._clock())
@@ -91,6 +97,14 @@ class SolutionIngester:
             self._store.remove(stale)
         outcome = IngestOutcome.REPLACED if dropped else IngestOutcome.NEW
         return Ingested(outcome=outcome, solution=solution)
+
+    def _without_forgotten(self, known: list[ReceivedSolution]) -> list[ReceivedSolution]:
+        """``known`` without the fixes this node forgot, which are dropped from the store
+        here: this process is the one that writes it."""
+        forgotten = self._forgotten.forgotten(k.solution.fix_id for k in known)
+        for stale in (k for k in known if k.solution.fix_id in forgotten):
+            self._store.remove(stale)
+        return [k for k in known if k.solution.fix_id not in forgotten]
 
     def _count(self, result: FixResult) -> ResultIngested:
         if result.node == self._node:

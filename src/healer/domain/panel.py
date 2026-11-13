@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from healer.domain.actions import PanelAction
 from healer.domain.history import RunOfTests, RunRecord, Shared, run_id
 from healer.domain.ledger import LedgerEntry, LedgerSummary, Resolution, total
 from healer.domain.listener import STALE_AFTER, ListenerStatus
@@ -161,6 +162,7 @@ class WaitingFixView(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    fix_id: str = Field(description="One per fix; several fixes for one error may wait.")
     signature: str
     error: str
     topic: str
@@ -179,7 +181,14 @@ class ActivityItem(BaseModel):
 
     at: datetime
     kind: Literal[
-        "incident", "suggestion", "waiting", "connection", "ignored", "rejected", "result"
+        "incident",
+        "suggestion",
+        "waiting",
+        "connection",
+        "ignored",
+        "rejected",
+        "result",
+        "action",
     ]
     state: CheckState
     title: str
@@ -416,6 +425,7 @@ def team_fix_view(
 def waiting_fix_view(pending: PendingShare, *, topic: str) -> WaitingFixView:
     solution = pending.solution
     return WaitingFixView(
+        fix_id=solution.fix_id,
         signature=solution.signature,
         error=solution.error,
         topic=pending.topic,
@@ -506,11 +516,23 @@ def activity(
     team: Iterable[TeamFixView],
     outbox: Iterable[WaitingFixView],
     listener: ListenerStatus | None,
+    actions: Iterable[PanelAction] = (),
     limit: int = ACTIVITY_SHOWN,
 ) -> list[ActivityItem]:
     """What happened lately, newest first: incidents, suggestions received, fixes left
-    waiting, and what the listener saw. A suggestion counts once, from the team's list."""
+    waiting, what the listener saw, and what was changed from the panel. A suggestion
+    counts once, from the team's list."""
     items = [_incident_item(incident) for incident in incidents]
+    items += [
+        ActivityItem(
+            at=action.at,
+            kind="action",
+            state=CheckState.OK,
+            title=action.title,
+            detail=action.detail,
+        )
+        for action in actions
+    ]
     items += [
         ActivityItem(
             at=fix.received_at,

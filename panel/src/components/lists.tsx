@@ -4,13 +4,16 @@ import {
   Alert02Icon,
   Bug01Icon,
   Folder01Icon,
+  Delete02Icon,
   InboxIcon,
   ListViewIcon,
+  SentIcon,
   UserGroupIcon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { Fragment, useState } from "react"
 
+import { ActionButton, Notice } from "@/components/action-button"
 import { exitCode, FixCard } from "@/components/fixes"
 import { RunSteps } from "@/components/run"
 import { EmptyState, SectionTitle } from "@/components/section"
@@ -37,7 +40,8 @@ import {
   STATUS_LABELS,
   timeAgo,
 } from "@/lib/format"
-import type { Incident, Project, TeamFix, WaitingFix } from "@/lib/types"
+import { act } from "@/lib/actions"
+import type { ActionOutcome, Incident, Project, TeamFix, WaitingFix } from "@/lib/types"
 
 export function Incidents({ incidents, now }: { incidents: Incident[]; now: Date }) {
   const [opened, setOpened] = useState<string | null>(null)
@@ -217,7 +221,20 @@ function Fact({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean; now: Date }) {
+export function Team({
+  team,
+  sharing,
+  now,
+  actions,
+  onChanged,
+}: {
+  team: TeamFix[]
+  sharing: boolean
+  now: Date
+  actions: boolean
+  onChanged: () => void
+}) {
+  const [notice, setNotice] = useState<ActionOutcome | null>(null)
   return (
     <section className="flex flex-col gap-4">
       <SectionTitle
@@ -226,6 +243,7 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
         title="From the team"
         description="Fixes other computers shared, several per error when they differ, tried first where they worked most. Each one is only a suggestion: healer run tests it, and nothing is applied on its own."
       />
+      {notice ? <Notice outcome={notice} /> : null}
       {team.length ? (
         team.map((fix) => (
           <FixCard
@@ -244,6 +262,21 @@ export function Team({ team, sharing, now }: { team: TeamFix[]; sharing: boolean
                 ? [`tried ${ordinal(fix.rank)} of ${fix.fixes_for_error} for this error`]
                 : []),
             ]}
+            aside={
+              actions ? (
+                <ActionButton
+                  icon={Delete02Icon}
+                  label="Forget"
+                  question={`Never offer this fix from ${fix.node} again?`}
+                  confirm="Forget it"
+                  run={() => act("team/forget", { fix: fix.fix_id })}
+                  onDone={(outcome) => {
+                    setNotice(outcome)
+                    onChanged()
+                  }}
+                />
+              ) : null
+            }
           />
         ))
       ) : (
@@ -266,19 +299,47 @@ function StepsToggle({ open, onToggle }: { open: boolean; onToggle: () => void }
   )
 }
 
-export function Outbox({ outbox, now }: { outbox: WaitingFix[]; now: Date }) {
+export function Outbox({
+  outbox,
+  now,
+  sharing,
+  actions,
+  onChanged,
+}: {
+  outbox: WaitingFix[]
+  now: Date
+  sharing: boolean
+  actions: boolean
+  onChanged: () => void
+}) {
+  const [notice, setNotice] = useState<ActionOutcome | null>(null)
+  const done = (outcome: ActionOutcome) => {
+    setNotice(outcome)
+    onChanged()
+  }
   return (
     <section className="flex flex-col gap-4">
       <SectionTitle
         icon={InboxIcon}
         tint="peach"
         title="Outbox"
-        description="Fixes accepted here that the broker did not take. The listener sends them when it is back, or run healer outbox --send."
+        description="Fixes accepted here, and results of the team's fixes, that the broker did not take. The listener sends them when it is back; Send now tries at once."
       />
+      {actions && sharing ? (
+        <ActionButton
+          icon={SentIcon}
+          label="Send now"
+          question="Send everything waiting for this topic now?"
+          confirm="Send"
+          run={() => act("outbox/send")}
+          onDone={done}
+        />
+      ) : null}
+      {notice ? <Notice outcome={notice} /> : null}
       {outbox.length ? (
         outbox.map((fix) => (
           <FixCard
-            key={`${fix.topic}-${fix.signature}`}
+            key={`${fix.topic}-${fix.fix_id}`}
             error={fix.error}
             signature={fix.signature}
             edits={fix.edits}
@@ -305,6 +366,18 @@ export function Outbox({ outbox, now }: { outbox: WaitingFix[]; now: Date }) {
                     Kept for another topic: it is sent only when MQTT_TOPIC is that one again.
                   </p>
                 )}
+                {actions ? (
+                  <div className="pt-1">
+                    <ActionButton
+                      icon={Delete02Icon}
+                      label="Discard"
+                      question="Discard this fix? The team will not receive it."
+                      confirm="Discard it"
+                      run={() => act("outbox/discard", { topic: fix.topic, fix: fix.fix_id })}
+                      onDone={done}
+                    />
+                  </div>
+                ) : null}
               </div>
             }
           />

@@ -2,6 +2,30 @@
 
 Every notable change to this project, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). ADR 0024 says what a version number promises.
 
+## [Unreleased]
+
+### Added
+
+- The panel can act on this node's own data:
+  - **Send now** sends everything waiting in the outbox.
+  - **Discard** drops one fix waiting.
+  - **Forget** never offers or keeps again a suggestion from the team.
+
+  Each asks first, says what it did, and shows up in the recent activity. Applying a fix stays in the terminal: the panel never sees your project.
+- `healer team --forget FIX` does the same as **Forget** from the terminal, and `healer team` shows each fix's id.
+
+### Security
+
+- An action must come from a page of the panel itself: its Origin, a JSON body, and the token of the panel's session. A page of another site can neither read the token nor send an action.
+
+### Changed
+
+- The panel's container can now write the data volume, for these actions. It still gets the code and the sandbox read only, and never sees the workspace.
+
+### Fixed
+
+- Two fixes for the same error waiting in the outbox no longer share one card in the panel.
+
 ## [1.0.0] - 2026-11-13
 
 The first release. It covers everything the plan commits to: its five phases and the gaps it listed. It also includes the first of its future ideas, ranking the team's fixes by success, and a local panel. Before it, the project had no version of its own, so every earlier commit counts as 0.x.
@@ -71,4 +95,5 @@ docker compose --profile team up -d listener   # only if you run the team listen
 - Nodes from before #23 neither send nor receive results. Results travel on their own topic, `MQTT_TOPIC/results`, so those nodes never see one.
 - A team with nodes of different versions still works; upgrading every node brings the ranking to all of them.
 
+[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.0.0

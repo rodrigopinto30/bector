@@ -17,7 +17,7 @@ from healer.domain.sharing import (
     seal_result,
 )
 from healer.services.solution_ingester import SolutionIngester
-from tests.conftest import FakeResults
+from tests.conftest import FakeForgotten, FakeResults
 
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
 KEY = b"0123456789abcdef-team-key"
@@ -82,11 +82,13 @@ def ingester(
     node: str = "laptop-luis",
     fixes_per_error: int = 2,
     results: FakeResults | None = None,
+    forgotten: FakeForgotten | None = None,
 ) -> SolutionIngester:
     return SolutionIngester(
         store,
         PatchPolicy(max_files=2, max_bytes=1_000),
         results=results if results is not None else FakeResults(),
+        forgotten=forgotten if forgotten is not None else FakeForgotten(),
         node=node,
         key=KEY,
         max_bytes=10_000,
@@ -223,6 +225,7 @@ def test_a_short_team_key_is_refused() -> None:
             FakeStore(),
             PatchPolicy(max_files=2, max_bytes=1),
             results=FakeResults(),
+            forgotten=FakeForgotten(),
             node="n",
             key=b"short",
             max_bytes=1,
@@ -302,3 +305,16 @@ def test_a_forged_result_is_rejected() -> None:
     )
     with pytest.raises(RejectedMessageError, match="forged or altered"):
         sut.ingest(seal_result(forged, b"not-the-team-key-0123456789"))
+
+
+def test_a_forgotten_fix_is_not_kept_again_and_leaves_the_store() -> None:
+    store, forgotten = FakeStore(), FakeForgotten()
+    sut = ingester(store, forgotten=forgotten)
+    sut.ingest(message(at=hours(1), new="first"))
+    first = solution_of(message(at=hours(1), new="first"))
+    forgotten.forget(first.fix_id, first.signature, NOW)
+
+    assert sut.ingest(message(at=hours(2), new="first")).outcome is IngestOutcome.FORGOTTEN
+    assert store.patches() == [patch("first")]
+    assert sut.ingest(message(at=hours(3), new="second")).outcome is IngestOutcome.NEW
+    assert store.patches() == [patch("second")]

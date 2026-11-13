@@ -37,6 +37,7 @@ from healer.domain.sharing import (
     IngestOutcome,
     PendingResult,
     PendingShare,
+    ReceivedSolution,
     ResendReport,
     ResultIngested,
     ResultOutcome,
@@ -48,6 +49,7 @@ from healer.factory import (
     build_diagnoser,
     build_fix_installer,
     build_fix_proposer,
+    build_forgotten,
     build_history,
     build_ledger,
     build_listener_status,
@@ -1246,6 +1248,8 @@ def _ingested_line(ingested: Ingested) -> str:
         return f"ignored    {summary}: already known"
     if ingested.outcome is IngestOutcome.OUTRANKED:
         return f"ignored    {summary}: ranks below every suggestion kept for this error"
+    if ingested.outcome is IngestOutcome.FORGOTTEN:
+        return f"ignored    {summary}: forgotten on this node"
     return "ignored    sent by this node"
 
 
@@ -1369,11 +1373,25 @@ def _send_outbox(
 
 
 @app.command()
-def team() -> None:
+def team(
+    forget: Annotated[
+        str | None,
+        typer.Option(
+            "--forget",
+            metavar="FIX",
+            help="Never offer or keep again this fix: its id, or the start shown by 'fix'",
+        ),
+    ] = None,
+) -> None:
     """Show the fixes received from the team. 'healer run' offers them; none is applied alone."""
     settings = Settings()
     try:
-        suggestions = build_team_solutions(settings).all()
+        kept = build_team_solutions(settings).all()
+        forgotten = build_forgotten(settings).forgotten(r.solution.fix_id for r in kept)
+        suggestions = [r for r in kept if r.solution.fix_id not in forgotten]
+        if forget is not None:
+            _forget_suggestion(settings, suggestions, forget)
+            return
         tallies = build_results(settings).tally(r.solution.fix_id for r in suggestions)
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -1390,12 +1408,31 @@ def team() -> None:
         solution = received.solution
         typer.echo("")
         typer.echo(f"{received.received_at:%Y-%m-%d %H:%M}  from {_printable(solution.node)}")
+        typer.echo(f"fix        {solution.fix_id[:12]}")
         typer.echo(f"error      {_printable(solution.error)}")
         typer.echo(f"files      {_printable(', '.join(solution.patch.files))}")
         typer.echo(f"evidence   {_printable(solution.evidence.command)}")
         tally = tallies.get(solution.fix_id)
         if tally is not None:
             typer.echo(f"results    {_results(tally.worked, tally.failed)}")
+
+
+def _forget_suggestion(
+    settings: Settings, suggestions: list[ReceivedSolution], prefix: str
+) -> None:
+    """Forget the one suggestion whose fix id starts with ``prefix`` (ADR 0025)."""
+    wanted = prefix.strip().lower()
+    found = [r for r in suggestions if wanted and r.solution.fix_id.startswith(wanted)]
+    if len(found) != 1:
+        why = "no suggestion has" if not found else f"{len(found)} suggestions have"
+        typer.echo(f"error: {why} a fix starting with {_printable(prefix)}", err=True)
+        raise typer.Exit(code=2)
+    solution = found[0].solution
+    build_forgotten(settings).forget(solution.fix_id, solution.signature, datetime.now(UTC))
+    typer.echo(
+        f"forgotten  the fix from {_printable(solution.node)} for {_printable(solution.error)}; "
+        "it will not be offered or kept again"
+    )
 
 
 @app.command()
@@ -1411,13 +1448,24 @@ def panel(
             help="Also answer to this name; ./panel.sh dev uses it for a container name",
         ),
     ] = None,
+    allow_origin: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow-origin",
+            help="Also take actions from pages of this origin; ./panel.sh dev uses it",
+        ),
+    ] = None,
 ) -> None:
-    """Show this node in the browser: its health, savings, incidents and fixes. Read only.
+    """Show this node in the browser: its health, savings, incidents and fixes.
 
-    It answers only to localhost, so other machines and other web sites cannot read it.
+    It answers only to localhost, so other machines and other web sites cannot read it. It
+    can send or discard what waits in the outbox and forget a suggestion from the team, but
+    only from its own pages, and it never sees or changes your project.
     """
     try:
-        application = build_panel_app(Settings(), extra_hosts=allow_host or [])
+        application = build_panel_app(
+            Settings(), extra_hosts=allow_host or [], extra_origins=allow_origin or []
+        )
     except HealerError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc

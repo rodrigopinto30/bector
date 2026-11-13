@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from healer.domain.actions import ActionOutcome, PanelAction
 from healer.domain.diagnosis import TracedError
 from healer.domain.execution import RunResult
 from healer.domain.history import RunRecord
@@ -209,6 +210,42 @@ class RunHistory(Protocol):
 
     def known(self, run_ids: Iterable[str]) -> set[str]:
         """Return which of ``run_ids`` are kept."""
+        ...
+
+
+class ForgottenFixes(Protocol):
+    """The team's fixes this node chose to forget: never offered or kept again (ADR 0025)."""
+
+    def forget(self, fix: str, signature: str, at: datetime) -> None:
+        """Remember to leave out the fix ``fix`` for the error ``signature``. Raise
+        ``ResultsError`` if it cannot be stored."""
+        ...
+
+    def forgotten(self, fix_ids: Iterable[str]) -> set[str]:
+        """Return which of ``fix_ids`` were forgotten."""
+        ...
+
+
+class PanelCommands(Protocol):
+    """What the panel may change, on this node's own data only (ADR 0025)."""
+
+    def send_outbox(self) -> ActionOutcome: ...
+
+    def discard(self, topic: str, fix: str) -> ActionOutcome: ...
+
+    def forget(self, fix: str) -> ActionOutcome: ...
+
+
+class ActionLog(Protocol):
+    """What was changed from the panel, kept for its recent activity (ADR 0025)."""
+
+    def record(self, action: PanelAction) -> None:
+        """Keep ``action`` and forget the oldest beyond the limit. Raise ``HistoryError`` if
+        it cannot be stored."""
+        ...
+
+    def recent(self, limit: int) -> list[PanelAction]:
+        """Return the latest ``limit`` actions, newest first."""
         ...
 
 

@@ -12,6 +12,7 @@ from healer.domain.history import run_id
 from healer.domain.ledger import LedgerEntry
 from healer.domain.listener import ListenerStatus
 from healer.domain.panel import (
+    ACTIVITY_SHOWN,
     INCIDENTS_SHOWN,
     Check,
     CheckState,
@@ -32,7 +33,9 @@ from healer.domain.panel import (
     waiting_fix_view,
 )
 from healer.domain.ports import (
+    ActionLog,
     Checkable,
+    ForgottenFixes,
     Ledger,
     ListenerStatusStore,
     ProjectStore,
@@ -75,6 +78,8 @@ class PanelReader:
         projects: ProjectStore,
         results: ResultStore,
         history: RunHistory,
+        forgotten: ForgottenFixes,
+        actions: ActionLog,
         listener: ListenerStatusStore,
         checks: Sequence[Check | Probe] = (),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -87,6 +92,8 @@ class PanelReader:
         self._projects = projects
         self._results = results
         self._history = history
+        self._forgotten = forgotten
+        self._actions = actions
         self._listener = listener
         self._checks = checks
         self._clock = clock
@@ -144,7 +151,15 @@ class PanelReader:
             projects=projects,
             team=team,
             outbox=waiting,
-            activity=activity(incidents=incidents, team=team, outbox=waiting, listener=listener),
+            activity=activity(
+                incidents=incidents,
+                team=team,
+                outbox=waiting,
+                listener=listener,
+                actions=self._read(
+                    "actions", problems, lambda: self._actions.recent(ACTIVITY_SHOWN), []
+                ),
+            ),
             problems=problems,
         )
 
@@ -158,7 +173,9 @@ class PanelReader:
         return [waiting_fix_view(p, topic=self._topic) for p in self._outbox.pending()]
 
     def _team(self) -> list[TeamFixView]:
-        suggestions = self._projects.team()
+        kept = self._projects.team()
+        forgotten = self._forgotten.forgotten(r.solution.fix_id for r in kept)
+        suggestions = [r for r in kept if r.solution.fix_id not in forgotten]
         tallies = self._results.tally(r.solution.fix_id for r in suggestions)
         return team_fix_views(suggestions, tallies)
 
