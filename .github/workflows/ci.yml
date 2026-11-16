@@ -1,8 +1,8 @@
 # Every pull request and every push to main build the images and run, inside them, the
 # same checks as on a developer's machine (section 7.7 of the plan): the lock is current,
 # ruff, mypy, the whole test suite with coverage, against the real broker and sandbox,
-# the coverage of the domain and the services, the checks of the panel, and the audit of
-# the Python and the panel dependencies.
+# the coverage of the domain and the services, the checks of the panel and of the desktop app, and the audit of
+# the Python, the panel and the desktop app dependencies.
 name: CI
 
 on:
@@ -62,6 +62,14 @@ jobs:
 
       - name: Panel dependency audit
         run: ./panel.sh audit
+
+      # The same for the desktop app, from desktop/package-lock.json. Electron's program is not
+      # downloaded: the checks need only its types.
+      - name: Desktop checks
+        run: ./desktop.sh check
+
+      - name: Desktop dependency audit
+        run: ./desktop.sh audit
 
       - name: Logs of the services
         if: failure()

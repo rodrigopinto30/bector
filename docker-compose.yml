@@ -10,6 +10,9 @@ x-healer: &healer
   security_opt: ["no-new-privileges:true"]
   env_file: .env
   environment: &healer-environment
+    # The desktop app gives the key through its own environment, so it is never written to a
+    # file. Without that variable, the key in .env (env_file above) is used, as always.
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     MQTT_HOST: ${MQTT_HOST:-mosquitto}
     MQTT_PORT: ${MQTT_PORT:-1883}
     SANDBOX_SOCKET: /sandbox/run/runner.sock

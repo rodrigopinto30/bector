@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "types": [],
+    "rootDir": "src",
+    "outDir": "dist/esm",
+    "sourceMap": false
+  },
+  "include": ["src/renderer/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -60,7 +60,7 @@ Every incident is recorded in a local ledger, so the tokens spent and saved can 
 
 - Linux (the start script can install Docker for you) or any system with Docker and Docker Compose already installed.
 - Port `1883` free on your machine (the MQTT broker listens on it, only for this machine by default).
-- An Anthropic API key, only for the fixes that Claude has to write.
+- An Anthropic API key, only for the fixes that Claude has to write. Put it in `.env`, or enter it in the desktop app, which checks it and keeps it in your system's secret store.
 
 ## Getting started
 
@@ -626,6 +626,28 @@ To watch the panel change, `./panel.sh demo` makes real events happen one at a t
 
 The pages are written with Next.js, TypeScript, Tailwind and shadcn, in `panel/`. The image builds them into static files, and `healer panel` serves them together with the data at `/api/snapshot`, so Node never runs in the containers.
 
+## The desktop app: a window instead of the terminal
+
+The desktop app is one window for setting this computer up and using the panel. It needs Docker, as the rest of the system does, and for now it runs on Linux, from the project's folder. `./desktop.sh electron` downloads its program once, after asking, and `./desktop.sh run` opens it.
+
+The window opens maximized and has its own title bar, with the name on the left and the minimize, maximize and close buttons on the right. Drag the bar to move the window, and double-click it to maximize or restore. A menu on the left has two sections: **Panel** and **Settings**. Its top button, **Menu**, collapses it to icons or expands it with their names, and the app remembers which you chose. Changing section never opens another window, and nothing moves: the menu and the title bar stay where they are, and the panel's own header and tabs stay fixed while only its content scrolls. `Ctrl+,` goes to Settings from anywhere.
+
+**Settings** has three cards:
+
+1. **Docker.** It checks that Docker answers without `sudo` and has Compose, and says what to do when it does not, such as `sudo usermod -aG docker $USER`. It never runs `sudo` or installs anything.
+2. **Your Anthropic key.** Paste it and press **Check and save**. The app asks Anthropic whether it accepts the key, by listing the models, which spends no tokens, and saves only a key that works. While it checks, the button says **Checking…** and the field is locked. A message above the field then says what happened, and goes when you move to another section, start typing another key or press the cross at its right, so an old message never stays next to a new attempt. The icon at its left only tells the state (a tick, a triangle, a circle with `!` or dots) and is never a cross. An empty field says **There is no key to check**. The message is one of: **Key saved**, with the masked key and what to do next; **The key was not saved**, with the reason (Anthropic does not accept it, does not allow it, could not be reached, or the text is not a key); or **The key works, but it was not saved**, when the secret store refused it. If a key was already saved, a refused one leaves it unchanged. **Get a key** opens the Anthropic console in your browser.
+3. **The services.** **Start and open the panel** runs the project's own `start.sh` the first time, and `docker compose up -d` afterwards, and shows the panel once it answers. The card then says whether the system sees your key, and, after you save a new one, that the services must restart to use it.
+
+On later runs, if the services are up, the window opens on the panel. If they are stopped, it opens on Settings. If the panel cannot be reached, its section says so and takes you to Settings.
+
+- **The key never touches the disk as text.** It is encrypted with your system's secret store (gnome-keyring or KWallet on Linux) and kept in a file only you can read. Without a secret store, Electron would fall back to plain text: the app refuses to save the key then, says why, and goes on without one.
+- **A locked secret store does not freeze the app.** If the store does not answer in 15 seconds, for example because it waits for you to unlock it, the key card says so and offers **Check again**. Docker, the services and the panel work meanwhile.
+- **It reaches the containers through the environment.** The app gives the key to `start.sh` or `docker compose` as `ANTHROPIC_API_KEY` in the environment of that one process, and `docker-compose.yml` passes it on to the containers. It is not written to `.env`, not put in a command line and hidden from the output the app shows. With no key in the app, the key in `.env` is used, as before.
+- **The window never shows the key again,** only its first and last characters, such as `sk-ant-…ab12`. The page cannot read it: it can only ask the app to check, save or remove one.
+- **Without a key the system still works,** with its local cache and the team's fixes. Only the fixes that Claude has to write need it.
+- **The panel has no bridge to the app.** The panel shows text that comes from other computers, so it is a separate web page, placed by the app over the content area of the window, that can load only the panel, at `localhost`, and nothing of the app can be reached from it. The page of the window itself loads no network, and may open only the Anthropic console and Docker's install guide in your browser.
+- **Changing the key restarts the services,** because the containers get it when they are created. The window says so and asks first.
+
 ## Redaction: hide secrets before anything leaves the machine
 
 `healer redact` prints a file (or stdin) with every credential replaced by a `[REDACTED:<kind>]` placeholder, and reports on stderr how many were hidden. The file itself is never modified. The same redactor runs on everything sent to Claude or published to other nodes.
@@ -676,6 +698,7 @@ Tests use a fake embedding function and a fake model, so they never download any
 5. `./deps.sh audit`.
 6. The checks of the panel, `./panel.sh check`: format, lint, types, tests and build.
 7. `./panel.sh audit`.
+8. The checks of the desktop app, `./desktop.sh check`, and `./desktop.sh audit`.
 
 If a step fails, the job also prints the logs of the services. It needs no secrets, because the tests never call the real API. The result appears in each pull request as the check **Build, lint, types, tests and audit**.
 
@@ -703,9 +726,9 @@ The workflow does not stop a merge by itself. To merge only when the check is gr
 [pre-commit] All checks passed.
 ```
 
-If the commit has files of `panel/`, it also runs `./panel.sh quick`: format, lint, types and tests, in a Node container.
+If the commit has files of `panel/` or `desktop/`, it also runs `./panel.sh quick` or `./desktop.sh quick`: format, lint, types and tests, in a Node container.
 
-It takes about 12 seconds for Python files. A commit with no Python and no panel files, such as one with only documentation, is not checked. If a check fails, the commit is not made and its output says why.
+It takes about 12 seconds for Python files. A commit with no Python, no panel and no desktop files, such as one with only documentation, is not checked. If a check fails, the commit is not made and its output says why.
 
 - **To skip it once:** `git commit --no-verify`.
 - **To turn it off:** `git config core.hooksPath .git/hooks`. `./start.sh` only turns it on when `core.hooksPath` is not set, so it stays off.
@@ -746,6 +769,23 @@ The panel's tools run in a Node container (`node:26.13.0-trixie-slim`, the same 
 - **The CSS of shadcn is copied into `panel/src/styles/shadcn.css`,** so its command line, which brought vulnerable packages, is not a dependency. To add a component, run `./panel.sh npm exec --yes shadcn@4.23.0 add NAME`.
 - **The types of `panel/src/lib/types.ts` mirror `PanelSnapshot`** (`src/healer/domain/panel.py`). The sample `panel/src/lib/fixtures/snapshot.json` is checked by a Python test against the model, so a field changed on one side and not the other makes a test fail.
 - After changing `panel/`, run `./stop.sh && ./start.sh` so http://localhost:8765 serves the new build.
+
+### The desktop app's code
+
+The desktop app's tools run in the same Node container as the panel's, as your own user.
+
+```bash
+./desktop.sh check     # format, lint, types, tests and build, as CI runs them
+./desktop.sh format    # rewrite the files of desktop/ in the project style
+./desktop.sh audit     # check the locked packages against the known vulnerabilities
+./desktop.sh electron  # download the Electron program, after asking you
+./desktop.sh run       # build the app and open it on your desktop
+./desktop.sh npm ...   # any npm command
+```
+
+- **The packages come from `desktop/package-lock.json`,** with install scripts off. That is why Electron's program is not downloaded with them: `./desktop.sh electron` does it, once, after asking, and checks it against the checksums Electron publishes. The checks and CI need only Electron's types.
+- **The page of the window is built into one file,** `desktop/dist/renderer/index.html`, with its script and styles inline and a Content-Security-Policy that allows exactly those two by their hash. A test checks that the page uses no markup built from text, no inline handlers and no imports.
+- **The version of `desktop/package.json` and its lock must equal the project's,** like the panel's. A Python test checks all of them.
 
 ## The Chroma database
 

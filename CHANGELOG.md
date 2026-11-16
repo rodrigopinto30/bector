@@ -4,6 +4,22 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- A desktop app, for Linux, with Docker: one window, maximized, with its own title bar (the window buttons on the right) and a side menu that collapses to icons, with the sections Panel and Settings. In Settings it checks Docker, takes your Anthropic key, checks it with Anthropic without spending tokens, keeps it in the system's secret store and starts the services; the panel is shown in the window itself. Saving or removing a key says clearly whether it worked: the message has a button to close it and also goes when you move to another section or start typing, so an old message never stays next to a new attempt. The state icons are drawn (a tick, a triangle, a circle with `!`, dots) and none is a cross, so they cannot be mistaken for that button. A secret store that is locked does not freeze the app. `./desktop.sh electron` downloads its program once, after asking you, and `./desktop.sh run` opens it.
+
+### Changed
+
+- `docker-compose.yml` passes `ANTHROPIC_API_KEY` from the environment of the command that starts the containers, so the desktop app can give the key without writing it to a file. Without that variable, the key in `.env` is used, as before. The containers are recreated the next time they start.
+
+### Fixed
+
+- The panel no longer moves when you change tab. The scrollbar of Overview made its content a few pixels narrower than the header and the tabs, so everything shifted sideways when changing section. The header and the tabs now stay fixed, only the content scrolls, and the space of the scrollbar is always reserved.
+
+### Security
+
+- The key is kept encrypted in the system's secret store, never as text. If the system has none, the app refuses to save it instead of falling back to plain text.
+
 ## [1.1.0] - 2026-11-16
 
 The panel no longer only reads: it can act on this node's own data, and only from its own pages.

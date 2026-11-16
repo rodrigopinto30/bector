@@ -10,9 +10,12 @@ ROOT = Path(__file__).parents[2]
 
 def test_every_place_names_the_same_version() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    panel = json.loads((ROOT / "panel" / "package.json").read_text())["version"]
-    lock = json.loads((ROOT / "panel" / "package-lock.json").read_text())
-    assert [project, panel, lock["version"], lock["packages"][""]["version"]] == [__version__] * 4
+    found = [project]
+    for app in ("panel", "desktop"):
+        found.append(json.loads((ROOT / app / "package.json").read_text())["version"])
+        lock = json.loads((ROOT / app / "package-lock.json").read_text())
+        found += [lock["version"], lock["packages"][""]["version"]]
+    assert found == [__version__] * 7
 
 
 def test_the_version_is_a_semantic_version() -> None:
