@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--CSP-->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Healer</title>
+    <!--STYLE-->
+  </head>
+  <body>
+    <div class="shell expanded" id="shell">
+      <header class="titlebar">
+        <div class="brand" id="brand"></div>
+        <div class="controls" id="controls"></div>
+      </header>
+      <nav class="sidebar" id="sidebar" aria-label="Sections"></nav>
+      <main class="content" id="content">
+        <section class="page center" id="loading" aria-live="polite">
+          <p class="lead">Checking Docker and the services…</p>
+        </section>
+        <section class="page" id="settings" hidden>
+          <header class="page-head">
+            <h1>Settings</h1>
+            <p class="lead">Docker, your Anthropic key and the services of the system.</p>
+          </header>
+          <section class="card" id="docker" aria-live="polite"></section>
+          <section class="card" id="key" aria-live="polite"></section>
+          <section class="card" id="stack" aria-live="polite"></section>
+          <pre
+            class="log"
+            id="log"
+            hidden
+            aria-label="What the services print while they start"
+          ></pre>
+        </section>
+        <section class="page" id="panel-note" hidden></section>
+      </main>
+    </div>
+    <!--SCRIPT-->
+  </body>
+</html>

@@ -7,3 +7,5 @@ workspace
 panel/node_modules
 panel/.next
 panel/out
+desktop/node_modules
+desktop/dist
