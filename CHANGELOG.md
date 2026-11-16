@@ -4,6 +4,10 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
+The panel no longer only reads: it can act on this node's own data, and only from its own pages.
+
 ### Added
 
 - The panel can act on this node's own data:
@@ -25,6 +29,20 @@ Every notable change to this project, newest first. The format follows [Keep a C
 ### Fixed
 
 - Two fixes for the same error waiting in the outbox no longer share one card in the panel.
+
+### Upgrading to 1.1.0
+
+```bash
+git pull
+./stop.sh && ./start.sh
+docker compose --profile team up -d listener   # only if you run the team listener
+```
+
+Nothing has to be converted by hand. `./start.sh` recreates the panel's container with write access to the data volume, and the panel's page should be reloaded once: an action needs the token of the panel's session, which changes each time the panel starts.
+
+### Compatibility within a team
+
+Nodes on 1.0.0 and 1.1.0 send and read the same messages. What a node forgets stays on that node: the others keep offering that fix.
 
 ## [1.0.0] - 2026-11-13
 
@@ -95,5 +113,6 @@ docker compose --profile team up -d listener   # only if you run the team listen
 - Nodes from before #23 neither send nor receive results. Results travel on their own topic, `MQTT_TOPIC/results`, so those nodes never see one.
 - A team with nodes of different versions still works; upgrading every node brings the ranking to all of them.
 
-[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.0.0
