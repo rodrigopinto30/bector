@@ -3,7 +3,7 @@
 import { Alert02Icon, Leaf01Icon, RefreshIcon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { cn } from "cn"
-import { useEffect, useState, useSyncExternalStore } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 
 import { Activity } from "@/components/activity"
 import { Health } from "@/components/health"
@@ -54,28 +54,45 @@ const SECTION_NAMES: Record<string, string> = {
   projects: "Projects",
 }
 
+/**
+ * The panel is as high as the window, with its header and tabs fixed: only the content below
+ * them scrolls, in its own area whose scrollbar space is always reserved. So changing tab, or
+ * a tab being longer than the window, never moves the header, the tabs or the content sideways.
+ */
+const FRAME = "mx-auto w-full max-w-6xl px-4 sm:px-6"
+const SCROLL = "min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]"
+/** The fixed parts reserve the same scrollbar space, so they line up with the content. */
+const FIXED = "shrink-0 overflow-y-hidden [scrollbar-gutter:stable]"
+
 export function Dashboard() {
   const { snapshot, error, refreshing, refresh } = useSnapshot()
+  const notice = error ? (
+    <Alert variant="destructive">
+      <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden />
+      <AlertTitle>The panel server does not answer</AlertTitle>
+      <AlertDescription>
+        {snapshot
+          ? `Showing what it said at ${formatMoment(snapshot.taken_at)}. ${error}.`
+          : `${error}. Check that the panel container runs: docker compose ps panel.`}
+      </AlertDescription>
+    </Alert>
+  ) : null
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:py-10">
-      <Header snapshot={snapshot} error={error} refreshing={refreshing} refresh={refresh} />
-      {error ? (
-        <Alert variant="destructive">
-          <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden />
-          <AlertTitle>The panel server does not answer</AlertTitle>
-          <AlertDescription>
-            {snapshot
-              ? `Showing what it said at ${formatMoment(snapshot.taken_at)}. ${error}.`
-              : `${error}. Check that the panel container runs: docker compose ps panel.`}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      {snapshot ? (
-        <div className={cn("transition-opacity", error && "opacity-70")}>
-          <Content snapshot={snapshot} refresh={refresh} />
+    <div className="flex h-dvh flex-col overflow-hidden">
+      <div className={FIXED}>
+        <div className={cn(FRAME, "pt-6 lg:pt-10")}>
+          <Header snapshot={snapshot} error={error} refreshing={refreshing} refresh={refresh} />
         </div>
-      ) : error ? null : (
-        <Loading />
+      </div>
+      {snapshot ? (
+        <Content snapshot={snapshot} refresh={refresh} notice={notice} faded={Boolean(error)} />
+      ) : (
+        <div className={SCROLL}>
+          <div className={cn(FRAME, "flex flex-col gap-6 py-6")}>
+            {notice}
+            {error ? null : <Loading />}
+          </div>
+        </div>
       )}
     </div>
   )
@@ -152,73 +169,95 @@ function useActions(): boolean {
   return enabled
 }
 
-function Content({ snapshot, refresh }: { snapshot: Snapshot; refresh: () => void }) {
+function Content({
+  snapshot,
+  refresh,
+  notice,
+  faded,
+}: {
+  snapshot: Snapshot
+  refresh: () => void
+  notice: ReactNode
+  faded: boolean
+}) {
   const actions = useActions()
   const now = new Date(snapshot.taken_at)
   const problems = Object.entries(snapshot.problems)
   const fixes = snapshot.projects.reduce((sum, project) => sum + project.fixes.length, 0)
   const [tab, setTab] = useTab()
+  const scroller = useRef<HTMLDivElement>(null)
+  const choose = (next: string) => {
+    scroller.current?.scrollTo({ top: 0 })
+    setTab(next)
+  }
   return (
-    <div className="flex flex-col gap-6">
-      {problems.length ? (
-        <Alert>
-          <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden />
-          <AlertTitle>Some parts could not be read</AlertTitle>
-          <AlertDescription>
-            <ul className="list-disc pl-4">
-              {problems.map(([section, problem]) => (
-                <li key={section}>
-                  <span className="font-semibold">{SECTION_NAMES[section] ?? section}</span>:{" "}
-                  {problem}
-                </li>
-              ))}
-            </ul>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      <Tabs value={tab} onValueChange={setTab} className="gap-6">
-        <TabsList className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto">
-          <TabsTrigger value="overview" className={TRIGGER}>
-            Overview
-          </TabsTrigger>
-          <Trigger value="incidents" label="Incidents" count={snapshot.incidents.length} />
-          <Trigger value="projects" label="Projects" count={fixes} />
-          <Trigger value="team" label="Team" count={snapshot.team.length} />
-          <Trigger value="outbox" label="Outbox" count={snapshot.outbox.length} />
-        </TabsList>
-        <TabsContent value="overview" className="flex flex-col gap-8">
-          <div className="grid gap-8 xl:grid-cols-[3fr_2fr]">
-            <Health checks={snapshot.checks} listener={snapshot.listener} now={now} />
-            <Activity items={snapshot.activity} now={now} />
-          </div>
-          <Savings savings={snapshot.savings} />
-        </TabsContent>
-        <TabsContent value="incidents">
-          <Incidents incidents={snapshot.incidents} now={now} />
-        </TabsContent>
-        <TabsContent value="projects">
-          <Projects projects={snapshot.projects} now={now} />
-        </TabsContent>
-        <TabsContent value="team">
-          <Team
-            team={snapshot.team}
-            sharing={snapshot.sharing}
-            now={now}
-            actions={actions}
-            onChanged={refresh}
-          />
-        </TabsContent>
-        <TabsContent value="outbox">
-          <Outbox
-            outbox={snapshot.outbox}
-            now={now}
-            sharing={snapshot.sharing}
-            actions={actions}
-            onChanged={refresh}
-          />
-        </TabsContent>
-      </Tabs>
-    </div>
+    <Tabs value={tab} onValueChange={choose} className="min-h-0 flex-1 gap-0">
+      <div className={FIXED}>
+        <div className={cn(FRAME, "pt-6")}>
+          <TabsList className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto">
+            <TabsTrigger value="overview" className={TRIGGER}>
+              Overview
+            </TabsTrigger>
+            <Trigger value="incidents" label="Incidents" count={snapshot.incidents.length} />
+            <Trigger value="projects" label="Projects" count={fixes} />
+            <Trigger value="team" label="Team" count={snapshot.team.length} />
+            <Trigger value="outbox" label="Outbox" count={snapshot.outbox.length} />
+          </TabsList>
+        </div>
+      </div>
+      <div ref={scroller} className={SCROLL}>
+        <div className={cn(FRAME, "flex flex-col gap-6 py-6", faded && "opacity-70")}>
+          {notice}
+          {problems.length ? (
+            <Alert>
+              <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden />
+              <AlertTitle>Some parts could not be read</AlertTitle>
+              <AlertDescription>
+                <ul className="list-disc pl-4">
+                  {problems.map(([section, problem]) => (
+                    <li key={section}>
+                      <span className="font-semibold">{SECTION_NAMES[section] ?? section}</span>:{" "}
+                      {problem}
+                    </li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          ) : null}
+          <TabsContent value="overview" className="flex flex-col gap-8">
+            <div className="grid gap-8 xl:grid-cols-[3fr_2fr]">
+              <Health checks={snapshot.checks} listener={snapshot.listener} now={now} />
+              <Activity items={snapshot.activity} now={now} />
+            </div>
+            <Savings savings={snapshot.savings} />
+          </TabsContent>
+          <TabsContent value="incidents">
+            <Incidents incidents={snapshot.incidents} now={now} />
+          </TabsContent>
+          <TabsContent value="projects">
+            <Projects projects={snapshot.projects} now={now} />
+          </TabsContent>
+          <TabsContent value="team">
+            <Team
+              team={snapshot.team}
+              sharing={snapshot.sharing}
+              now={now}
+              actions={actions}
+              onChanged={refresh}
+            />
+          </TabsContent>
+          <TabsContent value="outbox">
+            <Outbox
+              outbox={snapshot.outbox}
+              now={now}
+              sharing={snapshot.sharing}
+              actions={actions}
+              onChanged={refresh}
+            />
+          </TabsContent>
+        </div>
+      </div>
+    </Tabs>
   )
 }
 
