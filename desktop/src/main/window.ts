@@ -1,4 +1,4 @@
-import { BrowserWindow, nativeTheme, shell, WebContentsView } from "electron"
+import { BrowserWindow, dialog, nativeTheme, shell, WebContentsView } from "electron"
 
 import type { Bounds, Section, WindowAction } from "../shared/api"
 import { fitBounds } from "./layout"
@@ -17,6 +17,8 @@ export interface MainWindow {
   show(section: Section): Promise<void>
   setBounds(bounds: Bounds): void
   control(action: WindowAction): void
+  /** The system's dialog to choose a folder; null when it is closed without a choice. */
+  chooseFolder(): Promise<string | null>
   /** Sends an event to the page of the window. */
   send(channel: string, value?: unknown): void
 }
@@ -124,7 +126,7 @@ export function createMainWindow(options: MainWindowOptions): MainWindow {
   return {
     async show(next) {
       section = next
-      if (next === "settings") {
+      if (next !== "panel") {
         panel.setVisible(false)
         return
       }
@@ -152,6 +154,14 @@ export function createMainWindow(options: MainWindowOptions): MainWindow {
       } else {
         window.close()
       }
+    },
+    async chooseFolder() {
+      const answer = await dialog.showOpenDialog(window, {
+        title: "Choose the folder of your project",
+        buttonLabel: "Use this folder",
+        properties: ["openDirectory"],
+      })
+      return answer.canceled ? null : (answer.filePaths[0] ?? null)
     },
     send,
   }

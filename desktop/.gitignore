@@ -4,6 +4,9 @@
 # build
 /dist
 
+# the Electron program, kept outside node_modules so that npm ci does not delete it
+/.electron
+
 # debug
 npm-debug.log*
 

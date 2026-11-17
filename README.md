@@ -104,7 +104,7 @@ To stop everything:
 
 In `docker compose exec cli healer doctor`, `cli` is the service and `healer doctor` is the command that runs inside it. If you get `service "healer" is not running`, the command is from before the service was renamed to `cli`; `./stop.sh` also removes the old container.
 
-The project you want to analyze goes in the `workspace/` folder, which is mounted at `/workspace` inside the container. To use another folder, set `WORKSPACE_PATH` in `.env`.
+The project you want to analyze goes in the `workspace/` folder, which is mounted at `/workspace` inside the container. To use another folder, set `WORKSPACE_PATH` in `.env`, or choose it in the desktop app's **Project** section (see the desktop app below).
 
 ### Verify that everything works
 
@@ -628,9 +628,11 @@ The pages are written with Next.js, TypeScript, Tailwind and shadcn, in `panel/`
 
 ## The desktop app: a window instead of the terminal
 
-The desktop app is one window for setting this computer up and using the panel. It needs Docker, as the rest of the system does, and for now it runs on Linux, from the project's folder. `./desktop.sh electron` downloads its program once, after asking, and `./desktop.sh run` opens it.
+The desktop app is one window for setting this computer up and using the panel. It needs Docker, as the rest of the system does, and for now it runs on Linux, from the project's folder. `./desktop.sh electron` downloads its program once, after asking, and `./desktop.sh run` opens it. The program is kept in `desktop/.electron`, outside `node_modules`, so reinstalling the packages does not delete it; if the app asks for another version of Electron, `./desktop.sh run` says so and `./desktop.sh electron` downloads it.
 
-The window opens maximized and has its own title bar, with the name on the left and the minimize, maximize and close buttons on the right. Drag the bar to move the window, and double-click it to maximize or restore. A menu on the left has two sections: **Panel** and **Settings**. Its top button, **Menu**, collapses it to icons or expands it with their names, and the app remembers which you chose. Changing section never opens another window, and nothing moves: the menu and the title bar stay where they are, and the panel's own header and tabs stay fixed while only its content scrolls. `Ctrl+,` goes to Settings from anywhere.
+The window opens maximized and has its own title bar, with the name on the left and the minimize, maximize and close buttons on the right. Drag the bar to move the window, and double-click it to maximize or restore. A menu on the left has three sections: **Panel**, **Project** and **Settings**. Its top button, **Menu**, collapses it to icons or expands it with their names, and the app remembers which you chose. Changing section never opens another window, and nothing moves: the menu and the title bar stay where they are, and the panel's own header and tabs stay fixed while only its content scrolls. `Ctrl+,` goes to Settings from anywhere.
+
+**Project** is where you choose the folder with the code to fix, instead of copying it to `workspace/` or editing `.env`. **Choose a folder…** opens your system's folder dialog, and the folder you pick is kept by the app and shown with its full path. The app tells you what is worth knowing about it, such as an empty folder or one that does not look like a Python project, and refuses the folders that cannot be a project: the root of the disk, your whole home folder, the system's folders, a folder you cannot read and write, and a path with a colon, which Docker cannot mount. The services get the folder as `WORKSPACE_PATH` in the environment of the one process that starts them, as they get the key, so `.env` is never written. A folder that is chosen but not yet in use says so, and the services card offers **Restart and open the panel**; **Use the default folder** goes back to `workspace/` or to the `WORKSPACE_PATH` of your `.env`. If you start the services from a terminal without that variable, they use the folder of `.env` again, and the app notices it.
 
 **Settings** has three cards:
 
@@ -783,7 +785,7 @@ The desktop app's tools run in the same Node container as the panel's, as your o
 ./desktop.sh npm ...   # any npm command
 ```
 
-- **The packages come from `desktop/package-lock.json`,** with install scripts off. That is why Electron's program is not downloaded with them: `./desktop.sh electron` does it, once, after asking, and checks it against the checksums Electron publishes. The checks and CI need only Electron's types.
+- **The packages come from `desktop/package-lock.json`,** with install scripts off. That is why Electron's program is not downloaded with them: `./desktop.sh electron` does it, once, after asking, and checks it against the checksums Electron publishes. It is kept in `desktop/.electron`, because `npm ci` deletes `node_modules` whenever the lock changes, even for a new version number. The checks and CI need only Electron's types.
 - **The page of the window is built into one file,** `desktop/dist/renderer/index.html`, with its script and styles inline and a Content-Security-Policy that allows exactly those two by their hash. A test checks that the page uses no markup built from text, no inline handlers and no imports.
 - **The version of `desktop/package.json` and its lock must equal the project's,** like the panel's. A Python test checks all of them.
 

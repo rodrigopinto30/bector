@@ -4,7 +4,7 @@ import { fitBounds, isSection, isWindowAction, parseBounds } from "./layout"
 
 describe("the layout of the window", () => {
   it("knows its sections and its window actions", () => {
-    expect(["panel", "settings"].every(isSection)).toBe(true)
+    expect(["panel", "project", "settings"].every(isSection)).toBe(true)
     expect(["minimize", "toggleMaximize", "close"].every(isWindowAction)).toBe(true)
     for (const value of ["", "Panel", "admin", 1, null, undefined, {}]) {
       expect(isSection(value)).toBe(false)

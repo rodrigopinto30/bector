@@ -2,12 +2,16 @@ import type { StackResult, StackStatus } from "../shared/api"
 import { needsSetup, readPanelPort } from "./project"
 import type { Run } from "./process"
 import { VaultError } from "./vault"
+import type { WorkspacePlan } from "./workspace"
 
 /** The services that must be up for the system to work. The team listener is optional. */
 export const SERVICES = ["cli", "mosquitto", "panel", "sandbox"] as const
 
 const START_TIMEOUT_MS = 30 * 60_000
 const PANEL_WAIT_MS = 120_000
+
+/** Asks Docker which folder of this computer is mounted as /workspace in a container. */
+const MOUNT_FORMAT = '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}'
 
 export interface StackDeps {
   root: string
@@ -16,6 +20,10 @@ export interface StackDeps {
   readEnv(): Promise<string | null>
   /** The saved key, or null. It reaches the containers through the environment only. */
   key(): Promise<string | null>
+  /** The project folder the services should have, and whether the choice can be used. */
+  workspace(): Promise<WorkspacePlan>
+  /** Whether two paths are the same folder. */
+  sameFolder(a: string, b: string): Promise<boolean>
   /** Whether the panel answers at that address. */
   ping(url: string): Promise<boolean>
   sleep(ms: number): Promise<void>
@@ -26,7 +34,8 @@ export interface StackDeps {
  * Starts and stops the services of the system with the project's own scripts. The key goes to
  * the child process as ANTHROPIC_API_KEY, which docker-compose.yml passes on to the
  * containers: it is never written to a file or put in an argument, and it is hidden from
- * every line of output this passes on.
+ * every line of output this passes on. The project folder chosen in the app goes the same way,
+ * as WORKSPACE_PATH, and .env is never written.
  */
 export class Stack {
   private busy = false
@@ -44,7 +53,13 @@ export class Stack {
     )
     const services = listed.code === 0 ? listed.stdout.split(/\r?\n/).filter(Boolean).sort() : []
     const running = SERVICES.every((name) => services.includes(name))
-    return { running, services, keySeen: services.includes("cli") ? await this.keySeen() : null }
+    const cli = services.includes("cli")
+    return {
+      running,
+      services,
+      keySeen: cli ? await this.keySeen() : null,
+      workspaceMatches: cli ? await this.workspaceMatches() : null,
+    }
   }
 
   /**
@@ -99,7 +114,34 @@ export class Stack {
     return seen.stdout.trim() === "set"
   }
 
+  /**
+   * Whether the cli container has the folder that should be its project. Null when that cannot
+   * be told: the chosen folder is unusable, or Docker does not say.
+   */
+  private async workspaceMatches(): Promise<boolean | null> {
+    const plan = await this.deps.workspace()
+    if (plan.problem !== "") {
+      return null
+    }
+    const options = { cwd: this.deps.root, timeoutMs: 30_000 }
+    const listed = await this.deps.run("docker", ["compose", "ps", "-q", "cli"], options)
+    const id = listed.stdout.split(/\r?\n/).find(Boolean)?.trim()
+    if (listed.code !== 0 || id === undefined) {
+      return null
+    }
+    const mount = await this.deps.run("docker", ["inspect", "--format", MOUNT_FORMAT, id], options)
+    const actual = mount.stdout.trim()
+    if (mount.code !== 0 || actual === "") {
+      return null
+    }
+    return this.deps.sameFolder(actual, plan.expected)
+  }
+
   private async startServices(restart: boolean): Promise<StackResult> {
+    const plan = await this.deps.workspace()
+    if (plan.problem !== "") {
+      return { ok: false, message: `${plan.problem} The services were not started.` }
+    }
     let key: string | null
     try {
       key = await this.deps.key()
@@ -110,7 +152,8 @@ export class Stack {
       throw error
     }
     const before = await this.status()
-    if (!restart && before.running && (key === null || before.keySeen === true)) {
+    const inSync = before.workspaceMatches !== false
+    if (!restart && before.running && inSync && (key === null || before.keySeen === true)) {
       return { ok: true, message: this.ready(key, before.keySeen) }
     }
     const env = await this.deps.readEnv()
@@ -121,7 +164,10 @@ export class Stack {
       : (["docker", ["compose", "up", "-d"]] as const)
     const result = await this.deps.run(file, args, {
       cwd: this.deps.root,
-      env: key === null ? {} : { ANTHROPIC_API_KEY: key },
+      env: {
+        ...(key === null ? {} : { ANTHROPIC_API_KEY: key }),
+        ...(plan.env === null ? {} : { WORKSPACE_PATH: plan.env }),
+      },
       timeoutMs: START_TIMEOUT_MS,
       onLine: (line) => this.deps.onLine(hide(line)),
     })

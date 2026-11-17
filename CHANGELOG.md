@@ -4,6 +4,14 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- The desktop app has a **Project** section to choose the folder with the code to fix, with your system's folder dialog. The app refuses folders that cannot be a project (the root of the disk, your whole home folder, the system's folders, folders you cannot write to, paths with a colon), says what is worth knowing about the one you pick, and gives it to the services as `WORKSPACE_PATH` in the environment of the process that starts them, so `.env` is never written. If the services have another folder, the app says so and offers to restart them.
+
+### Fixed
+
+- `./desktop.sh` no longer deletes the Electron program when the packages are reinstalled. It is kept in `desktop/.electron`, outside `node_modules`, because `npm ci` deletes `node_modules` whenever the lock changes, even for a new version number. If the app asks for another version of Electron than the one downloaded, `./desktop.sh run` says so.
+
 ## [1.2.0] - 2026-11-17
 
 The system gets a desktop app: one window to check Docker, set the Anthropic key and use the panel, without the terminal.

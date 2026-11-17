@@ -3,7 +3,15 @@ import { join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
-import type { DockerStatus, KeyCheck, KeySave, KeyStatus, StackStatus } from "../shared/api"
+import type {
+  DockerStatus,
+  KeyCheck,
+  KeySave,
+  KeyStatus,
+  ProjectChoice,
+  ProjectInfo,
+  StackStatus,
+} from "../shared/api"
 import {
   canStart,
   checkMessage,
@@ -13,10 +21,15 @@ import {
   ICONS,
   dockerCard,
   EMPTY_NOTICE,
+  folderName,
   KEY_CHECK_FAILED,
-  KeyMessage,
+  Message,
   keyCard,
   PANEL_DOWN,
+  PROJECT_CHECK_FAILED,
+  PROJECT_RESET_NOTICE,
+  projectCard,
+  projectNotice,
   removeNotice,
   SAVE_FAILED_NOTICE,
   saveNotice,
@@ -124,8 +137,15 @@ describe("the key card", () => {
   })
 })
 
+const RUNNING: StackStatus = {
+  running: true,
+  services: ["cli", "panel"],
+  keySeen: true,
+  workspaceMatches: true,
+}
+
 describe("the services card", () => {
-  const running: StackStatus = { running: true, services: ["cli", "panel"], keySeen: true }
+  const running = RUNNING
 
   it("shows that it is working, running or stopped", () => {
     expect(stackCard(null, true, "").title).toBe("Starting the services…")
@@ -136,14 +156,21 @@ describe("the services card", () => {
     expect(stackCard({ ...running, keySeen: false }, false, "").lines[0]).toBe(
       "The system does not see an Anthropic key.",
     )
-    expect(stackCard({ running: false, services: ["cli"], keySeen: null }, false, "")).toEqual({
+    expect(
+      stackCard(
+        { running: false, services: ["cli"], keySeen: null, workspaceMatches: null },
+        false,
+        "",
+      ),
+    ).toEqual({
       tone: "warn",
       title: "The services are stopped",
       lines: ["Running: cli."],
     })
-    expect(stackCard({ running: false, services: [], keySeen: null }, false, "").lines).toEqual([
-      "Running: none.",
-    ])
+    expect(
+      stackCard({ running: false, services: [], keySeen: null, workspaceMatches: null }, false, "")
+        .lines,
+    ).toEqual(["Running: none."])
   })
 
   it("adds what the last start said", () => {
@@ -255,7 +282,7 @@ describe("the message about the last attempt with the key", () => {
   const wrong = saveNotice({ saved: false, check: { state: "malformed" }, status: null }, false)
 
   it("is shown until something else happens, and then it goes", () => {
-    const message = new KeyMessage()
+    const message = new Message()
     expect(message.notice).toBeNull()
     expect(message.dismiss()).toBe(false)
     message.show(wrong)
@@ -266,7 +293,7 @@ describe("the message about the last attempt with the key", () => {
   })
 
   it("is replaced at once when a new attempt starts, so an old message never stays", () => {
-    const message = new KeyMessage()
+    const message = new Message()
     message.show(wrong)
     message.begin()
     expect(message.checking).toBe(true)
@@ -275,14 +302,14 @@ describe("the message about the last attempt with the key", () => {
   })
 
   it("cannot be dismissed while a key is being checked, because its answer is due", () => {
-    const message = new KeyMessage()
+    const message = new Message()
     message.begin()
     expect(message.dismiss()).toBe(false)
     expect(message.notice).toBe(CHECKING_NOTICE)
   })
 
   it("gives way to the answer, and stops checking", () => {
-    const message = new KeyMessage()
+    const message = new Message()
     message.begin()
     const saved = saveNotice(
       {
@@ -299,9 +326,141 @@ describe("the message about the last attempt with the key", () => {
   })
 })
 
+const SHOP = "/home/ana/shop"
+const DEFAULT: ProjectInfo = { chosen: null, folder: "/repo/workspace", problem: "", hints: [] }
+const CHOSEN: ProjectInfo = { chosen: SHOP, folder: SHOP, problem: "", hints: [] }
+
+describe("the project card", () => {
+  it("says it is checking until it knows", () => {
+    expect(projectCard(null, null)).toEqual({
+      tone: "idle",
+      title: "Checking your project…",
+      lines: [],
+    })
+  })
+
+  it("shows the default folder, and says to put the project there or choose another", () => {
+    const card = projectCard(DEFAULT, null)
+    expect(card).toMatchObject({ tone: "idle", title: "The default folder" })
+    expect(card.lines[0]).toBe("/repo/workspace")
+    expect(card.lines.join(" ")).toMatch(/choose the folder where it already is/)
+  })
+
+  it("shows a chosen folder by its name, with its full path", () => {
+    const card = projectCard(CHOSEN, RUNNING)
+    expect(card).toEqual({
+      tone: "good",
+      title: "Your project: shop",
+      lines: [SHOP, "The services are working on it."],
+    })
+  })
+
+  it("says what is worth knowing about the folder without refusing it", () => {
+    const hint = "It does not look like a Python project."
+    const card = projectCard({ ...CHOSEN, hints: [hint] }, RUNNING)
+    expect(card.tone).toBe("warn")
+    expect(card.lines).toContain(hint)
+  })
+
+  it("says that the services stopped, or have another folder, and what to do", () => {
+    const stopped: StackStatus = {
+      running: false,
+      services: [],
+      keySeen: null,
+      workspaceMatches: null,
+    }
+    expect(projectCard(CHOSEN, stopped).lines).toEqual([SHOP, "The services are stopped."])
+    expect(projectCard(CHOSEN, null).lines).toContain("The services are stopped.")
+    const other: StackStatus = { ...RUNNING, workspaceMatches: false }
+    const chosen = projectCard(CHOSEN, other)
+    expect(chosen.tone).toBe("warn")
+    expect(chosen.lines).toContain(
+      "The services still use another folder: restart them to use this one.",
+    )
+    const back = projectCard(DEFAULT, other)
+    expect(back.tone).toBe("warn")
+    expect(back.lines).toContain(
+      "The services still use another folder: restart them to go back to this one.",
+    )
+  })
+
+  it("says nothing about the services when it cannot be told which folder they have", () => {
+    const unknown: StackStatus = { ...RUNNING, workspaceMatches: null }
+    expect(projectCard(CHOSEN, unknown).lines).toEqual([SHOP])
+  })
+
+  it("says why a folder that was chosen cannot be used now", () => {
+    const gone: ProjectInfo = {
+      chosen: SHOP,
+      folder: SHOP,
+      problem: "The folder does not exist.",
+      hints: [],
+    }
+    expect(projectCard(gone, RUNNING)).toEqual({
+      tone: "bad",
+      title: "The project folder cannot be used",
+      lines: [
+        SHOP,
+        "The folder does not exist.",
+        "Choose it again, or go back to the default folder.",
+      ],
+    })
+  })
+
+  it("names a folder by its last part", () => {
+    expect(folderName("/home/ana/shop")).toBe("shop")
+    expect(folderName("/home/ana/shop/")).toBe("shop")
+    expect(folderName("/")).toBe("/")
+    expect(folderName("shop")).toBe("shop")
+  })
+})
+
+describe("what is said after the folder dialog", () => {
+  const choice = (patch: Partial<ProjectChoice>): ProjectChoice => ({
+    changed: false,
+    message: "",
+    project: DEFAULT,
+    ...patch,
+  })
+
+  it("says the project was chosen, and what comes next", () => {
+    const chosen = choice({ changed: true, project: CHOSEN })
+    expect(projectNotice(chosen, true)).toEqual({
+      tone: "good",
+      title: "Project chosen",
+      text: `${SHOP} is now the project. Restart the services to use it.`,
+    })
+    expect(projectNotice(chosen, false)?.text).toMatch(/Start the services to use it\.$/)
+  })
+
+  it("says why a folder was refused, and says nothing when the dialog was closed", () => {
+    expect(projectNotice(choice({ message: "That is the root of the disk." }), true)).toEqual({
+      tone: "bad",
+      title: "That folder was not chosen",
+      text: "That is the root of the disk.",
+    })
+    expect(projectNotice(choice({}), true)).toBeNull()
+  })
+
+  it("has a message for going back to the default folder, and for a failure nobody planned", () => {
+    expect(PROJECT_RESET_NOTICE.tone).toBe("good")
+    expect(PROJECT_CHECK_FAILED.tone).toBe("bad")
+  })
+})
+
+describe("what a restart of the services is waiting for", () => {
+  it("says it for a new key and for a folder that is not in use yet, together", () => {
+    const lines = stackCard(RUNNING, false, "", ["key", "project"]).lines
+    expect(lines).toContain("A new key is waiting: restart the services to use it.")
+    expect(lines).toContain(
+      "The project folder chosen here is not in use yet: restart the services to use it.",
+    )
+  })
+})
+
 describe("the window", () => {
   it("has its sections in the menu, the panel first and the settings", () => {
-    expect(SECTIONS.map((section) => section.id)).toEqual(["panel", "settings"])
+    expect(SECTIONS.map((section) => section.id)).toEqual(["panel", "project", "settings"])
     expect(SECTIONS.every((section) => section.label.length > 0)).toBe(true)
   })
 
@@ -316,11 +475,10 @@ describe("the window", () => {
   })
 
   it("says that a new key is waiting for the services to restart", () => {
-    const running: StackStatus = { running: true, services: ["cli"], keySeen: true }
-    expect(stackCard(running, false, "", true).lines).toContain(
+    expect(stackCard(RUNNING, false, "", ["key"]).lines).toContain(
       "A new key is waiting: restart the services to use it.",
     )
-    expect(stackCard(running, false, "", false).lines.join(" ")).not.toMatch(/waiting/)
+    expect(stackCard(RUNNING, false, "", []).lines.join(" ")).not.toMatch(/waiting/)
   })
 })
 

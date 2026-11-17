@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
+import { homedir } from "node:os"
 import { join } from "node:path"
 
 import {
@@ -22,6 +23,7 @@ import { run } from "./process"
 import { findProjectRoot, readPanelPort } from "./project"
 import { Stack } from "./stack"
 import { KeyVault, vaultFile } from "./vault"
+import { defaultFolder, folderProbe, textFile, Workspace } from "./workspace"
 import { createMainWindow, type MainWindow } from "./window"
 
 /** The app: one window, with its own title bar and menu, that shows the settings or the panel. */
@@ -45,6 +47,12 @@ async function start(): Promise<void> {
     safeStorage,
     vaultFile(join(app.getPath("userData"), "anthropic-key.bin")),
   )
+  const workspace = new Workspace({
+    store: textFile(join(app.getPath("userData"), "project.json")),
+    probe: folderProbe(),
+    home: homedir(),
+    defaultFolder: async () => defaultFolder(root, await readEnv()),
+  })
   const fetchFn: Fetch = (url, init) => net.fetch(url, init)
   let main: MainWindow | null = null
 
@@ -53,6 +61,8 @@ async function start(): Promise<void> {
     run,
     readEnv,
     key: () => vault.load(),
+    workspace: () => workspace.plan(),
+    sameFolder: (a, b) => workspace.same(a, b),
     ping: async (url) => {
       try {
         return (await net.fetch(url, { signal: AbortSignal.timeout(3_000) })).status === 200
@@ -68,11 +78,13 @@ async function start(): Promise<void> {
     docker: () => checkDocker(run),
     vault,
     stack,
+    workspace,
     fetchFn,
     window: {
       show: (section) => main?.show(section) ?? Promise.resolve(),
       setBounds: (bounds) => main?.setBounds(bounds),
       control: (action) => main?.control(action),
+      chooseFolder: () => main?.chooseFolder() ?? Promise.resolve(null),
     },
     openExternal: (url) => shell.openExternal(url),
   })

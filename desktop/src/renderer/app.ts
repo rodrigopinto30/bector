@@ -4,6 +4,8 @@ import type {
   KeyCheck,
   KeySave,
   KeyStatus,
+  ProjectChoice,
+  ProjectInfo,
   Section,
   StackResult,
   StackStatus,
@@ -51,6 +53,7 @@ export const STATE_LABELS: Record<Tone, string> = {
 /** The sections of the menu. More can be added here: each needs its icon and its content. */
 export const SECTIONS: ReadonlyArray<{ id: Section; label: string }> = [
   { id: "panel", label: "Panel" },
+  { id: "project", label: "Project" },
   { id: "settings", label: "Settings" },
 ]
 
@@ -179,11 +182,12 @@ export const EMPTY_NOTICE: Notice = {
 }
 
 /**
- * The message about the last thing done with the key. It stays while it is the latest news, and
- * goes as soon as it no longer is: when the user moves to another section or starts to type
- * another key. While a key is being checked it cannot be dismissed, because its answer is due.
+ * The message about the last thing done with the key, or with the project. It stays while it is
+ * the latest news, and goes as soon as it no longer is: when the user moves to another section
+ * or starts to type another key. While something is being checked it cannot be dismissed,
+ * because its answer is due.
  */
-export class KeyMessage {
+export class Message {
   notice: Notice | null = null
   checking = false
 
@@ -249,11 +253,19 @@ export function keyCard(status: KeyStatus | null, systemSeesKey = false): Card {
   }
 }
 
+/** What a restart of the services is waiting for. */
+export type Waiting = "key" | "project"
+
+const WAITING_TEXT: Record<Waiting, string> = {
+  key: "A new key is waiting: restart the services to use it.",
+  project: "The project folder chosen here is not in use yet: restart the services to use it.",
+}
+
 export function stackCard(
   status: StackStatus | null,
   busy: boolean,
   message: string,
-  restartPending = false,
+  waiting: readonly Waiting[] = [],
 ): Card {
   if (busy) {
     return {
@@ -271,11 +283,97 @@ export function stackCard(
       status.keySeen === true
         ? "The system sees your Anthropic key."
         : "The system does not see an Anthropic key."
-    const waiting = restartPending ? ["A new key is waiting: restart the services to use it."] : []
-    return { tone: "good", title: "The services are running", lines: [key, ...waiting, ...extra] }
+    const pending = waiting.map((reason) => WAITING_TEXT[reason])
+    return { tone: "good", title: "The services are running", lines: [key, ...pending, ...extra] }
   }
   const up = status.services.length ? status.services.join(", ") : "none"
   return { tone: "warn", title: "The services are stopped", lines: [`Running: ${up}.`, ...extra] }
+}
+
+/** The last part of a path: the name of the folder. */
+export function folderName(path: string): string {
+  const parts = path.split("/").filter(Boolean)
+  return parts[parts.length - 1] ?? path
+}
+
+/** What the services do about the project folder, told next to the folder. */
+function servicesAndFolder(stack: StackStatus | null, chosen: boolean): string[] {
+  if (stack === null || !stack.running) {
+    return ["The services are stopped."]
+  }
+  if (stack.workspaceMatches === true) {
+    return ["The services are working on it."]
+  }
+  if (stack.workspaceMatches === false) {
+    return [
+      chosen
+        ? "The services still use another folder: restart them to use this one."
+        : "The services still use another folder: restart them to go back to this one.",
+    ]
+  }
+  return []
+}
+
+export function projectCard(info: ProjectInfo | null, stack: StackStatus | null): Card {
+  if (info === null) {
+    return { tone: "idle", title: "Checking your project…", lines: [] }
+  }
+  if (info.problem !== "") {
+    return {
+      tone: "bad",
+      title: "The project folder cannot be used",
+      lines: [info.folder, info.problem, "Choose it again, or go back to the default folder."],
+    }
+  }
+  const chosen = info.chosen !== null
+  const services = servicesAndFolder(stack, chosen)
+  const mismatch = stack?.running === true && stack.workspaceMatches === false
+  if (!chosen) {
+    return {
+      tone: mismatch ? "warn" : "idle",
+      title: "The default folder",
+      lines: [
+        info.folder,
+        "Put your project there, or choose the folder where it already is.",
+        ...services,
+      ],
+    }
+  }
+  return {
+    tone: info.hints.length > 0 || mismatch ? "warn" : "good",
+    title: `Your project: ${folderName(info.folder)}`,
+    lines: [info.folder, ...info.hints, ...services],
+  }
+}
+
+/** What to tell after the folder dialog. Nothing when it was closed without a choice. */
+export function projectNotice(choice: ProjectChoice, servicesRunning: boolean): Notice | null {
+  if (choice.changed) {
+    const next = servicesRunning
+      ? " Restart the services to use it."
+      : " Start the services to use it."
+    return {
+      tone: "good",
+      title: "Project chosen",
+      text: `${choice.project.folder} is now the project.${next}`,
+    }
+  }
+  if (choice.message !== "") {
+    return { tone: "bad", title: "That folder was not chosen", text: choice.message }
+  }
+  return null
+}
+
+export const PROJECT_RESET_NOTICE: Notice = {
+  tone: "good",
+  title: "Back to the default folder",
+  text: "The services use the default folder again once they restart.",
+}
+
+export const PROJECT_CHECK_FAILED: Notice = {
+  tone: "bad",
+  title: "That folder was not chosen",
+  text: "The app could not do that. Try again.",
 }
 
 /** Shown in place of the panel when it cannot be loaded. */
@@ -302,6 +400,7 @@ const SVG_NS = "http://www.w3.org/2000/svg"
 export const ICONS = {
   logo: ["M5 19c0-8 5-13 14-14 0 9-5 14-14 14z", "M5 19l7-7"],
   menu: ["M4 6h16", "M4 12h16", "M4 18h16"],
+  project: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
   panel: ["M4 4h7v9H4z", "M13 4h7v5h-7z", "M13 11h7v9h-7z", "M4 15h7v5H4z"],
   settings: [
     "M4 7h9",
@@ -437,14 +536,21 @@ function main(): void {
   const byId = (id: string) => document.getElementById(id) as HTMLElement
   const shell = byId("shell")
   const content = byId("content")
-  const views = { loading: byId("loading"), settings: byId("settings"), note: byId("panel-note") }
+  const views = {
+    loading: byId("loading"),
+    project: byId("project"),
+    settings: byId("settings"),
+    note: byId("panel-note"),
+  }
   const sections = {
+    project: byId("project-card"),
     docker: byId("docker"),
     key: byId("key"),
     stack: byId("stack"),
     log: byId("log"),
   }
-  const keyMessage = new KeyMessage()
+  const keyMessage = new Message()
+  const projectMessage = new Message()
   const state = {
     view: "loading" as "loading" | Section,
     initial: true,
@@ -453,6 +559,8 @@ function main(): void {
     expanded: remembered(),
     docker: null as DockerStatus | null,
     key: null as KeyStatus | null,
+    project: null as ProjectInfo | null,
+    choosing: false,
     stack: null as StackStatus | null,
     busy: false,
     message: "",
@@ -543,9 +651,17 @@ function main(): void {
     sections.key.querySelector("input")?.focus()
   }
 
+  /** The messages about the last thing done go when the user moves to another section. */
+  function dismissMessages(): void {
+    dismissMessage()
+    if (projectMessage.dismiss()) {
+      sections.project.querySelector(".banner")?.remove()
+    }
+  }
+
   async function go(section: Section): Promise<void> {
     if (section !== state.view) {
-      dismissMessage()
+      dismissMessages()
     }
     state.view = section
     if (section === "panel") {
@@ -558,6 +674,7 @@ function main(): void {
 
   function renderView(): void {
     views.loading.hidden = state.view !== "loading"
+    views.project.hidden = state.view !== "project"
     views.settings.hidden = state.view !== "settings"
     const down = state.view === "panel" && state.panelFailed
     views.note.hidden = !down
@@ -581,10 +698,95 @@ function main(): void {
 
   function render(): void {
     renderControls()
+    renderProject()
     renderDocker()
     renderKey()
     renderStack()
     renderView()
+  }
+
+  function renderProject(): void {
+    const info = state.project
+    const controls: Node[] = []
+    if (projectMessage.notice !== null) {
+      controls.push(
+        banner(projectMessage.notice, () => {
+          dismissMessages()
+        }),
+      )
+    }
+    if (info !== null) {
+      controls.push(
+        ...actions(
+          button(
+            state.choosing ? "Choosing…" : "Choose a folder…",
+            () => void chooseProject(),
+            "primary",
+            state.choosing,
+          ),
+          ...(info.chosen !== null
+            ? [button("Use the default folder", () => void resetProject(), "ghost", state.choosing)]
+            : []),
+        ),
+      )
+    }
+    draw(sections.project, projectCard(info, state.stack), ...controls)
+  }
+
+  /** What a restart of the services would apply: a new key, and a folder they do not have yet. */
+  function waiting(): Waiting[] {
+    return [
+      ...(state.restart ? (["key"] as const) : []),
+      ...(state.stack?.running === true && state.stack.workspaceMatches === false
+        ? (["project"] as const)
+        : []),
+    ]
+  }
+
+  /** The services may now have another folder than the chosen one: ask them again. */
+  async function refreshStack(): Promise<void> {
+    if (state.docker?.ok === true) {
+      state.stack = await api.stackStatus().catch(() => state.stack)
+    }
+  }
+
+  async function chooseProject(): Promise<void> {
+    if (state.choosing) {
+      return
+    }
+    state.choosing = true
+    projectMessage.dismiss()
+    renderProject()
+    try {
+      const choice = await api.projectChoose()
+      state.project = choice.project
+      const notice = projectNotice(choice, state.stack?.running === true)
+      if (notice !== null) {
+        projectMessage.show(notice)
+      }
+    } catch {
+      projectMessage.show(PROJECT_CHECK_FAILED)
+    }
+    state.choosing = false
+    await refreshStack()
+    render()
+  }
+
+  async function resetProject(): Promise<void> {
+    if (state.choosing) {
+      return
+    }
+    state.choosing = true
+    renderProject()
+    try {
+      state.project = await api.projectReset()
+      projectMessage.show(PROJECT_RESET_NOTICE)
+    } catch {
+      projectMessage.show(PROJECT_CHECK_FAILED)
+    }
+    state.choosing = false
+    await refreshStack()
+    render()
   }
 
   function renderDocker(): void {
@@ -641,14 +843,15 @@ function main(): void {
 
   function renderStack(): void {
     const docker = state.docker
-    const label = state.restart
-      ? "Restart with the new key and open the panel"
-      : state.stack?.running
-        ? "Open the panel"
-        : "Start and open the panel"
+    const label =
+      waiting().length > 0
+        ? "Restart and open the panel"
+        : state.stack?.running
+          ? "Open the panel"
+          : "Start and open the panel"
     draw(
       sections.stack,
-      stackCard(state.stack, state.busy, state.message, state.restart),
+      stackCard(state.stack, state.busy, state.message, waiting()),
       ...actions(
         button(label, () => void start(), "primary", !canStart(docker, state.busy)),
         ...(state.stack?.services.length
@@ -714,7 +917,7 @@ function main(): void {
   }
 
   async function start(): Promise<void> {
-    if (state.stack?.running && !state.restart) {
+    if (state.stack?.running && waiting().length === 0) {
       await go("panel")
       return
     }
@@ -723,7 +926,7 @@ function main(): void {
     sections.log.textContent = ""
     render()
     const stopListening = api.onLine(show)
-    const result = await attempt(() => api.stackStart(state.restart))
+    const result = await attempt(() => api.stackStart(waiting().length > 0))
     stopListening()
     state.busy = false
     state.message = result.message
@@ -754,6 +957,7 @@ function main(): void {
     state.docker = null
     render()
     const key = checkKey()
+    state.project = await api.projectStatus().catch(() => null)
     state.docker = await api.dockerCheck()
     state.stack = state.docker.ok ? await api.stackStatus() : null
     render()
