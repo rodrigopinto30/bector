@@ -4,6 +4,10 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-17
+
+The system gets a desktop app: one window to check Docker, set the Anthropic key and use the panel, without the terminal.
+
 ### Added
 
 - A desktop app, for Linux, with Docker: one window, maximized, with its own title bar (the window buttons on the right) and a side menu that collapses to icons, with the sections Panel and Settings. In Settings it checks Docker, takes your Anthropic key, checks it with Anthropic without spending tokens, keeps it in the system's secret store and starts the services; the panel is shown in the window itself. Saving or removing a key says clearly whether it worked: the message has a button to close it and also goes when you move to another section or start typing, so an old message never stays next to a new attempt. The state icons are drawn (a tick, a triangle, a circle with `!`, dots) and none is a cross, so they cannot be mistaken for that button. A secret store that is locked does not freeze the app. `./desktop.sh electron` downloads its program once, after asking you, and `./desktop.sh run` opens it.
@@ -19,6 +23,26 @@ Every notable change to this project, newest first. The format follows [Keep a C
 ### Security
 
 - The key is kept encrypted in the system's secret store, never as text. If the system has none, the app refuses to save it instead of falling back to plain text.
+
+### Upgrading to 1.2.0
+
+```bash
+git pull
+./stop.sh && ./start.sh
+```
+
+Nothing has to be converted by hand. `./start.sh` recreates the containers, because `docker-compose.yml` now passes `ANTHROPIC_API_KEY` from the environment of the command that starts them. If you export `ANTHROPIC_API_KEY` in your shell, the containers now get that value instead of the one in `.env`; with nothing exported, `.env` is used as before. Reload the panel's page once to get its fixed layout.
+
+The desktop app is optional. To try it, you need Docker working without `sudo`:
+
+```bash
+./desktop.sh electron   # downloads Electron's program once, about 270 MB unpacked, after asking
+./desktop.sh run
+```
+
+### Compatibility within a team
+
+Nodes on 1.1.0 and 1.2.0 send and read the same messages. The desktop app only starts the services of one computer: nothing a team shares changes.
 
 ## [1.1.0] - 2026-11-16
 
@@ -129,6 +153,7 @@ docker compose --profile team up -d listener   # only if you run the team listen
 - Nodes from before #23 neither send nor receive results. Results travel on their own topic, `MQTT_TOPIC/results`, so those nodes never see one.
 - A team with nodes of different versions still works; upgrading every node brings the ranking to all of them.
 
-[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.2.0
 [1.1.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.0.0

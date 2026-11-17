@@ -12,7 +12,7 @@ At this stage the scope is **Python projects only**.
 
 ## Project status
 
-Version **1.1.0**. `CHANGELOG.md` lists what each version adds, how to upgrade and which versions work together in a team.
+Version **1.2.0**. `CHANGELOG.md` lists what each version adds, how to upgrade and which versions work together in a team.
 
 All five development phases are implemented. The broker requires a password per machine and can use TLS, so the team's machines can share fixes over a network they do not trust. The tests of every patch run in a separate sandbox container, with no network, no secrets and no access to your files. The containers run as your own user, with no privileges, except the sandbox's server. Every dependency is locked with its hashes and audited. Every pull request is checked by a CI pipeline, and every commit by a local pre-commit check. A local panel shows all of it in the browser.
 
