@@ -57,7 +57,24 @@ install() {
   fi
 }
 
-ELECTRON="desktop/node_modules/electron/dist/electron"
+# The program is kept outside node_modules: npm ci deletes node_modules whenever the lock changes,
+# even for a new version number, and would delete a 270 MB download with it.
+ELECTRON_DIR="desktop/.electron"
+ELECTRON="$ELECTRON_DIR/electron"
+
+# The version of Electron the app asks for, and the one that is downloaded.
+electron_wanted() {
+  sed -nE 's/^[[:space:]]*"electron":[[:space:]]*"([^"]+)".*/\1/p' desktop/package.json | head -n 1
+}
+electron_have() {
+  [ -f "$ELECTRON_DIR/version" ] && tr -d 'v\r\n ' < "$ELECTRON_DIR/version" || true
+}
+# Whether the downloaded program is the version the app asks for (true if it does not say).
+electron_current() {
+  local have
+  have="$(electron_have)"
+  [ -z "$have" ] || [ "$have" = "$(electron_wanted)" ]
+}
 
 case "${1:-}" in
   check)
@@ -77,14 +94,14 @@ case "${1:-}" in
     ;;
   electron)
     install
-    if [ -x "$ELECTRON" ]; then
+    if [ -x "$ELECTRON" ] && electron_current; then
       echo "[desktop] The Electron program is already downloaded."
       exit 0
     fi
     cat <<'TXT'
 This downloads the Electron program from the releases of github.com/electron, and checks it
 against the checksums that Electron publishes. It takes about 270 MB once unpacked. It is the
-only thing downloaded besides the locked packages. It is kept in desktop/node_modules, and
+only thing downloaded besides the locked packages. It is kept in desktop/.electron, and
 nothing is installed on the rest of your computer.
 TXT
     read -r -p "Download it? [y/N] " answer
@@ -93,6 +110,9 @@ TXT
       exit 1
     fi
     in_node "$NODE_IMAGE" node node_modules/electron/install.js
+    rm -rf "$ELECTRON_DIR"
+    mv desktop/node_modules/electron/dist "$ELECTRON_DIR"
+    echo "[desktop] The Electron program is in $ELECTRON_DIR."
     ;;
   run)
     shift
@@ -100,6 +120,10 @@ TXT
     in_node "$NODE_IMAGE" npm run --silent build
     if [ ! -x "$ELECTRON" ]; then
       echo "[desktop] The Electron program is not downloaded yet: run ./desktop.sh electron" >&2
+      exit 1
+    fi
+    if ! electron_current; then
+      echo "[desktop] The Electron program is version $(electron_have) and the app asks for $(electron_wanted): run ./desktop.sh electron" >&2
       exit 1
     fi
     HEALER_HOME="$PWD" exec "$ELECTRON" "$@" desktop
