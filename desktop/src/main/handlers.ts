@@ -3,6 +3,8 @@ import type {
   DockerStatus,
   KeySave,
   KeyStatus,
+  ProjectChoice,
+  ProjectInfo,
   Section,
   StackResult,
   StackStatus,
@@ -13,6 +15,7 @@ import { isSection, isWindowAction, parseBounds } from "./layout"
 import { isAllowedExternal } from "./policy"
 import type { Stack } from "./stack"
 import { VaultError, type KeyVault } from "./vault"
+import type { Workspace } from "./workspace"
 
 const MAX_KEY_CHARS = 512
 const MAX_URL_CHARS = 200
@@ -21,12 +24,15 @@ export interface HandlerDeps {
   docker(): Promise<DockerStatus>
   vault: Pick<KeyVault, "status" | "save" | "remove">
   stack: Pick<Stack, "status" | "start" | "stop">
+  workspace: Pick<Workspace, "info" | "choose" | "reset">
   fetchFn: Fetch
   /** The window: which section it shows, where its content is, and its own buttons. */
   window: {
     show(section: Section): Promise<void>
     setBounds(bounds: Bounds): void
     control(action: WindowAction): void
+    /** Opens the system's folder dialog; null when it is closed without a choice. */
+    chooseFolder(): Promise<string | null>
   }
   openExternal(url: string): Promise<void>
 }
@@ -77,6 +83,17 @@ export function createHandlers(deps: HandlerDeps) {
     "stack:status": (): Promise<StackStatus> => deps.stack.status(),
     "stack:start": (restart?: unknown): Promise<StackResult> => deps.stack.start(restart === true),
     "stack:stop": (): Promise<StackResult> => deps.stack.stop(),
+    "project:status": (): Promise<ProjectInfo> => deps.workspace.info(),
+    // The page asks for a dialog and nothing else: the folder comes only from the dialog, so a
+    // page cannot name a folder to be mounted in the containers.
+    "project:choose": async (): Promise<ProjectChoice> => {
+      const folder = await deps.window.chooseFolder()
+      if (folder === null) {
+        return { changed: false, message: "", project: await deps.workspace.info() }
+      }
+      return deps.workspace.choose(folder)
+    },
+    "project:reset": (): Promise<ProjectInfo> => deps.workspace.reset(),
     "section:show": async (section: unknown): Promise<void> => {
       if (!isSection(section)) {
         throw new Error("that section does not exist")

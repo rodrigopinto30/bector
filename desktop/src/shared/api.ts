@@ -41,6 +41,28 @@ export interface StackStatus {
   services: string[]
   /** Whether the cli container has a key; null when it is not running. */
   keySeen: boolean | null
+  /** Whether the cli container has the project folder that should be there; null when it is not running. */
+  workspaceMatches: boolean | null
+}
+
+/** The folder with the code to fix, the one the services see as /workspace. */
+export interface ProjectInfo {
+  /** The folder chosen in the app, or null when the default one is used. */
+  chosen: string | null
+  /** The folder the services should have: the chosen one, or the default. */
+  folder: string
+  /** Why the chosen folder cannot be used now; empty when it can. */
+  problem: string
+  /** What is worth knowing about the folder. It never stops the folder from being used. */
+  hints: string[]
+}
+
+export interface ProjectChoice {
+  /** False when the dialog was closed or the folder was refused. */
+  changed: boolean
+  /** Why the folder was refused; empty otherwise. */
+  message: string
+  project: ProjectInfo
 }
 
 export interface StackResult {
@@ -49,7 +71,7 @@ export interface StackResult {
 }
 
 /** The two sections of the window: the panel, and the settings of the app. */
-export type Section = "panel" | "settings"
+export type Section = "panel" | "project" | "settings"
 
 /** A rectangle of the window, in pixels from its top left corner. */
 export interface Bounds {
@@ -75,6 +97,11 @@ export interface HealerApi {
   /** With ``restart``, the services are recreated even if they run, to apply a changed key. */
   stackStart(restart?: boolean): Promise<StackResult>
   stackStop(): Promise<StackResult>
+  projectStatus(): Promise<ProjectInfo>
+  /** Opens the system's folder dialog. The page never says which folder: only the dialog does. */
+  projectChoose(): Promise<ProjectChoice>
+  /** Goes back to the default folder. */
+  projectReset(): Promise<ProjectInfo>
   /** Shows a section. The panel is shown by the app on top of the page, in the content area. */
   showSection(section: Section): Promise<void>
   /** Where the content area is, so the app can put the panel exactly there. */

@@ -4,7 +4,7 @@ import type { Bounds, Section, WindowAction } from "../shared/api"
 const LIMIT = 20_000
 
 export function isSection(value: unknown): value is Section {
-  return value === "panel" || value === "settings"
+  return value === "panel" || value === "project" || value === "settings"
 }
 
 export function isWindowAction(value: unknown): value is WindowAction {

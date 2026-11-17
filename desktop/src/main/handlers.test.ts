@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import type { Bounds, KeyStatus, Section, WindowAction } from "../shared/api"
+import type { Bounds, KeyStatus, ProjectInfo, Section, WindowAction } from "../shared/api"
 import { createHandlers, type HandlerDeps } from "./handlers"
 import { API_VERSION, type Fetch } from "./key"
 import { VaultError } from "./vault"
@@ -8,7 +8,21 @@ import { VaultError } from "./vault"
 const KEY = `sk-ant-api03-${"AbCdEfGh1234567890_-".repeat(3)}`
 const READY: KeyStatus = { vault: "ready", reason: "", stored: false, masked: "" }
 
-function setup(options: { status?: number; saveError?: Error } = {}) {
+const DEFAULT_PROJECT: ProjectInfo = {
+  chosen: null,
+  folder: "/repo/workspace",
+  problem: "",
+  hints: [],
+}
+
+function setup(
+  options: { status?: number; saveError?: Error; dialog?: string | null; refuse?: string } = {},
+) {
+  const { dialog = null } = options
+  const asked: string[] = []
+  const chosen: string[] = []
+  let resets = 0
+  let dialogs = 0
   const saved: string[] = []
   const opened: string[] = []
   const requests: Array<Record<string, string>> = []
@@ -41,15 +55,42 @@ function setup(options: { status?: number; saveError?: Error } = {}) {
       },
     },
     stack: {
-      status: async () => ({ running: false, services: [], keySeen: null }),
+      status: async () => ({
+        running: false,
+        services: [],
+        keySeen: null,
+        workspaceMatches: null,
+      }),
       start: async (restart) => {
         started.push(restart === true)
         return { ok: true, message: "ok" }
       },
       stop: async () => ({ ok: true, message: "stopped" }),
     },
+    workspace: {
+      info: async () => DEFAULT_PROJECT,
+      choose: async (path) => {
+        chosen.push(path)
+        if (options.refuse !== undefined) {
+          return { changed: false, message: options.refuse, project: DEFAULT_PROJECT }
+        }
+        return {
+          changed: true,
+          message: "",
+          project: { ...DEFAULT_PROJECT, chosen: path, folder: path },
+        }
+      },
+      reset: async () => {
+        resets += 1
+        return DEFAULT_PROJECT
+      },
+    },
     fetchFn,
     window: {
+      chooseFolder: async () => {
+        dialogs += 1
+        return dialog
+      },
       show: async (section) => {
         shown.push(section)
       },
@@ -74,6 +115,10 @@ function setup(options: { status?: number; saveError?: Error } = {}) {
     placed,
     controlled,
     statusCalls: () => statusCalls,
+    asked,
+    chosen,
+    resets: () => resets,
+    dialogs: () => dialogs,
   }
 }
 
@@ -196,6 +241,53 @@ describe("the rest of what the page asks", () => {
     expect(await handlers["docker:check"]()).toEqual({ ok: true, version: "27" })
     expect(await handlers["stack:status"]()).toMatchObject({ running: false })
     expect(await handlers["stack:stop"]()).toEqual({ ok: true, message: "stopped" })
+  })
+})
+
+describe("the project folder", () => {
+  it("says which folder the project is", async () => {
+    const { handlers } = setup()
+    expect(await handlers["project:status"]()).toEqual(DEFAULT_PROJECT)
+  })
+
+  it("keeps the folder the dialog gives, and nothing else", async () => {
+    const { handlers, chosen, dialogs } = setup({ dialog: "/home/ana/shop" })
+    const answer = await handlers["project:choose"]()
+    expect(dialogs()).toBe(1)
+    expect(chosen).toEqual(["/home/ana/shop"])
+    expect(answer).toMatchObject({ changed: true, project: { chosen: "/home/ana/shop" } })
+  })
+
+  it("never takes a folder from the page, which can only ask for the dialog", async () => {
+    const { handlers, chosen } = setup({ dialog: "/home/ana/shop" })
+    for (const fromPage of ["/", "/etc", "/home/ana", { folder: "/" }, ["/"], null]) {
+      await (handlers["project:choose"] as (...values: unknown[]) => Promise<unknown>)(fromPage)
+    }
+    expect(chosen).toEqual(Array(6).fill("/home/ana/shop"))
+  })
+
+  it("changes nothing when the dialog is closed", async () => {
+    const { handlers, chosen } = setup({ dialog: null })
+    expect(await handlers["project:choose"]()).toEqual({
+      changed: false,
+      message: "",
+      project: DEFAULT_PROJECT,
+    })
+    expect(chosen).toEqual([])
+  })
+
+  it("passes on why a folder was refused", async () => {
+    const { handlers } = setup({ dialog: "/", refuse: "That is the root of the disk." })
+    expect(await handlers["project:choose"]()).toMatchObject({
+      changed: false,
+      message: "That is the root of the disk.",
+    })
+  })
+
+  it("goes back to the default folder", async () => {
+    const { handlers, resets } = setup()
+    expect(await handlers["project:reset"]()).toEqual(DEFAULT_PROJECT)
+    expect(resets()).toBe(1)
   })
 })
 

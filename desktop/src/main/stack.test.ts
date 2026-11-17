@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest"
 import type { Run, RunOptions, RunResult } from "./process"
 import { Stack, SERVICES, type StackDeps } from "./stack"
 import { VaultError } from "./vault"
+import type { WorkspacePlan } from "./workspace"
 
 const KEY = `sk-ant-api03-${"AbCdEfGh1234567890_-".repeat(3)}`
 const ROOT = "/home/pc/healer"
 const SET_UP = "ANTHROPIC_API_KEY=\nHOST_UID=1000\nHOST_GID=1000\n"
+const DEFAULT_FOLDER = "/home/pc/healer/workspace"
+const NO_CHOICE: WorkspacePlan = { problem: "", env: null, expected: DEFAULT_FOLDER }
 
 interface Call {
   line: string
@@ -30,8 +33,14 @@ function computer(options: {
   startFailed?: string
   startOutput?: string[]
   panelAnswers?: boolean
+  /** What the app chose for the project folder. */
+  plan?: WorkspacePlan
+  /** The folder the cli container has mounted; null when Docker does not say. */
+  mounted?: string | null
 }) {
   const { up = [], env = SET_UP, key = KEY, startCode = 0, panelAnswers = true } = options
+  const plan = options.plan ?? NO_CHOICE
+  let mounted = options.mounted === undefined ? DEFAULT_FOLDER : options.mounted
   let cliKey = options.cliKey ?? false
   const calls: Call[] = []
   const lines: string[] = []
@@ -40,11 +49,17 @@ function computer(options: {
   const run: Run = async (file, args, runOptions = {}) => {
     const line = [file, ...args].join(" ")
     calls.push({ line, file, args, options: runOptions })
+    if (line === "docker compose ps -q cli") {
+      return result(0, running.has("cli") ? "abc123\n" : "")
+    }
     if (line.startsWith("docker compose ps")) {
       return result(0, [...running].join("\n"))
     }
     if (line.startsWith("docker compose exec")) {
       return result(0, cliKey ? "set\n" : "unset\n")
+    }
+    if (line.startsWith("docker inspect ")) {
+      return mounted === null ? result(1) : result(0, `${mounted}\n`)
     }
     if (line === "bash stop.sh") {
       running.clear()
@@ -56,6 +71,7 @@ function computer(options: {
     if (startCode === 0) {
       SERVICES.forEach((name) => running.add(name))
       cliKey = key !== null
+      mounted = runOptions.env?.["WORKSPACE_PATH"] ?? DEFAULT_FOLDER
     }
     return result(startCode, "", options.startFailed ?? "")
   }
@@ -69,6 +85,8 @@ function computer(options: {
       }
       return key
     },
+    workspace: async () => plan,
+    sameFolder: async (a, b) => a === b,
     ping: async () => panelAnswers,
     sleep: async (ms) => {
       slept.push(ms)
@@ -88,6 +106,7 @@ describe("the state of the services", () => {
       running: true,
       services: [...SERVICES].sort(),
       keySeen: true,
+      workspaceMatches: true,
     })
     expect(await computer({ up: SERVICES, cliKey: false }).stack.status()).toMatchObject({
       keySeen: false,
@@ -106,6 +125,116 @@ describe("the state of the services", () => {
     const asked = calls.find((call) => call.line.startsWith("docker compose exec"))
     expect(asked?.args.join(" ")).toContain("echo set || echo unset")
     expect(asked?.args.join(" ")).not.toMatch(/printenv|echo \$ANTHROPIC/)
+  })
+})
+
+const SHOP = "/home/ana/shop"
+const CHOSEN: WorkspacePlan = { problem: "", env: SHOP, expected: SHOP }
+
+describe("the project folder of the services", () => {
+  it("says the cli has the folder that should be its project, or another one", async () => {
+    const same = computer({ up: SERVICES, mounted: DEFAULT_FOLDER })
+    expect((await same.stack.status()).workspaceMatches).toBe(true)
+    const other = computer({ up: SERVICES, mounted: "/home/ana/old", plan: CHOSEN })
+    expect((await other.stack.status()).workspaceMatches).toBe(false)
+    const chosen = computer({ up: SERVICES, mounted: SHOP, plan: CHOSEN })
+    expect((await chosen.stack.status()).workspaceMatches).toBe(true)
+  })
+
+  it("asks Docker only for the mount of /workspace of the cli, nothing else", async () => {
+    const { stack, calls } = computer({ up: SERVICES, mounted: SHOP, plan: CHOSEN })
+    await stack.status()
+    const inspect = calls.find((call) => call.line.startsWith("docker inspect"))
+    expect(inspect?.args).toEqual([
+      "inspect",
+      "--format",
+      '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}',
+      "abc123",
+    ])
+  })
+
+  it("says nothing when the cli is not running, when Docker does not say, or the folder is unusable", async () => {
+    expect((await computer({ up: ["mosquitto"] }).stack.status()).workspaceMatches).toBeNull()
+    expect(
+      (await computer({ up: SERVICES, mounted: null }).stack.status()).workspaceMatches,
+    ).toBeNull()
+    const broken: WorkspacePlan = {
+      problem: "The folder does not exist.",
+      env: null,
+      expected: SHOP,
+    }
+    expect(
+      (await computer({ up: SERVICES, plan: broken }).stack.status()).workspaceMatches,
+    ).toBeNull()
+  })
+
+  it("gives the chosen folder to the services through the environment, never in a command line", async () => {
+    const { stack, calls } = computer({ up: [], plan: CHOSEN })
+    expect((await stack.start()).ok).toBe(true)
+    const run = started(calls)[0]
+    expect(run?.options.env).toEqual({ ANTHROPIC_API_KEY: KEY, WORKSPACE_PATH: SHOP })
+    expect(run?.line).not.toContain(SHOP)
+    expect(JSON.stringify(calls.map((call) => call.args))).not.toContain(SHOP)
+  })
+
+  it("leaves the default folder alone when none was chosen", async () => {
+    const { stack, calls } = computer({ up: [] })
+    await stack.start()
+    expect(started(calls)[0]?.options.env).toEqual({ ANTHROPIC_API_KEY: KEY })
+  })
+
+  it("recreates the services that run with another folder, though nothing else changed", async () => {
+    const { stack, calls } = computer({
+      up: SERVICES,
+      cliKey: true,
+      mounted: "/home/ana/old",
+      plan: CHOSEN,
+    })
+    expect((await stack.status()).workspaceMatches).toBe(false)
+    expect((await stack.start()).ok).toBe(true)
+    expect(started(calls)).toHaveLength(1)
+    expect(started(calls)[0]?.options.env?.["WORKSPACE_PATH"]).toBe(SHOP)
+    expect((await stack.status()).workspaceMatches).toBe(true)
+  })
+
+  it("brings the services back to the default folder when the choice is removed", async () => {
+    const { stack, calls } = computer({ up: SERVICES, cliKey: true, mounted: SHOP })
+    expect((await stack.status()).workspaceMatches).toBe(false)
+    await stack.start()
+    expect(started(calls)).toHaveLength(1)
+    expect(started(calls)[0]?.options.env).toEqual({ ANTHROPIC_API_KEY: KEY })
+    expect((await stack.status()).workspaceMatches).toBe(true)
+  })
+
+  it("does nothing when they already have the folder", async () => {
+    const { stack, calls } = computer({ up: SERVICES, cliKey: true, mounted: SHOP, plan: CHOSEN })
+    expect((await stack.start()).ok).toBe(true)
+    expect(started(calls)).toEqual([])
+  })
+
+  it("does not start, and says why, when the chosen folder cannot be used", async () => {
+    const broken: WorkspacePlan = {
+      problem: "The project folder cannot be used: The folder does not exist.",
+      env: null,
+      expected: SHOP,
+    }
+    const { stack, calls } = computer({ up: [], plan: broken })
+    expect(await stack.start()).toEqual({
+      ok: false,
+      message:
+        "The project folder cannot be used: The folder does not exist. The services were not started.",
+    })
+    expect(calls).toEqual([])
+  })
+
+  it("hides the key from the output, and the folder is not a secret", async () => {
+    const { stack, lines } = computer({
+      up: [],
+      plan: CHOSEN,
+      startOutput: [`using ${KEY} on ${SHOP}`],
+    })
+    await stack.start()
+    expect(lines).toEqual([`using [hidden] on ${SHOP}`])
   })
 })
 
