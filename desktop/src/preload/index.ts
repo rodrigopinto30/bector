@@ -26,11 +26,16 @@ const api: HealerApi = {
   projectStatus: () => ipcRenderer.invoke("project:status"),
   projectChoose: () => ipcRenderer.invoke("project:choose"),
   projectReset: () => ipcRenderer.invoke("project:reset"),
+  fixStatus: () => ipcRenderer.invoke("fix:status"),
+  fixTest: () => ipcRenderer.invoke("fix:test"),
+  fixFind: () => ipcRenderer.invoke("fix:find"),
+  fixCancel: () => ipcRenderer.invoke("fix:cancel"),
   showSection: (section) => ipcRenderer.invoke("section:show", section),
   setContentBounds: (bounds) => ipcRenderer.invoke("layout:content", bounds),
   windowControl: (action) => ipcRenderer.invoke("window:control", action),
   openLink: (url) => ipcRenderer.invoke("link:open", url),
   onLine: (listener) => subscribe("stack:line", String, listener),
+  onFixLine: (listener) => subscribe("fix:line", String, listener),
   onWindowState: (listener) =>
     subscribe(
       "window:state",

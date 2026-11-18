@@ -1,6 +1,7 @@
 import { BrowserWindow, dialog, nativeTheme, shell, WebContentsView } from "electron"
 
 import type { Bounds, Section, WindowAction } from "../shared/api"
+import type { Question } from "./fix"
 import { fitBounds } from "./layout"
 import { PanelLoad } from "./panel-load"
 import { isAllowedExternal, isPanelUrl, panelUrl } from "./policy"
@@ -19,6 +20,8 @@ export interface MainWindow {
   control(action: WindowAction): void
   /** The system's dialog to choose a folder; null when it is closed without a choice. */
   chooseFolder(): Promise<string | null>
+  /** A question in a dialog of the app; true only if the user accepts it. */
+  confirm(question: Question): Promise<boolean>
   /** Sends an event to the page of the window. */
   send(channel: string, value?: unknown): void
 }
@@ -162,6 +165,19 @@ export function createMainWindow(options: MainWindowOptions): MainWindow {
         properties: ["openDirectory"],
       })
       return answer.canceled ? null : (answer.filePaths[0] ?? null)
+    },
+    async confirm(question) {
+      const answer = await dialog.showMessageBox(window, {
+        type: "question",
+        title: question.title,
+        message: question.message,
+        detail: question.detail,
+        buttons: ["Cancel", question.ok],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      })
+      return answer.response === 1
     },
     send,
   }

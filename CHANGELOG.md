@@ -7,6 +7,7 @@ Every notable change to this project, newest first. The format follows [Keep a C
 ### Added
 
 - The desktop app has a **Project** section to choose the folder with the code to fix, with your system's folder dialog. The app refuses folders that cannot be a project (the root of the disk, your whole home folder, the system's folders, folders you cannot write to, paths with a colon), says what is worth knowing about the one you pick, and gives it to the services as `WORKSPACE_PATH` in the environment of the process that starts them, so `.env` is never written. If the services have another folder, the app says so and offers to restart them.
+- The desktop app has a **Fix** section to run the tests of the project and look for a fix from the window, with what the system prints shown as it happens. It never changes your files: the fix found is only saved, in the data volume. Because asking Claude for a patch spends tokens, the app asks first, in its own dialog where Cancel is the default, and skips the question when the services have no key. **Stop** ends the run inside the container and frees the test sandbox.
 
 ### Fixed
 

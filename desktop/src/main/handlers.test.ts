@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 
-import type { Bounds, KeyStatus, ProjectInfo, Section, WindowAction } from "../shared/api"
+import type {
+  Bounds,
+  FixKind,
+  FixResult,
+  KeyStatus,
+  ProjectInfo,
+  Section,
+  WindowAction,
+} from "../shared/api"
 import { createHandlers, type HandlerDeps } from "./handlers"
 import { API_VERSION, type Fetch } from "./key"
 import { VaultError } from "./vault"
@@ -15,6 +23,8 @@ const DEFAULT_PROJECT: ProjectInfo = {
   hints: [],
 }
 
+const DONE = (kind: FixKind): FixResult => ({ kind, outcome: "passed", message: "ok" })
+
 function setup(
   options: { status?: number; saveError?: Error; dialog?: string | null; refuse?: string } = {},
 ) {
@@ -27,6 +37,7 @@ function setup(
   const opened: string[] = []
   const requests: Array<Record<string, string>> = []
   const started: boolean[] = []
+  const fixed: string[] = []
   const shown: Section[] = []
   const placed: Bounds[] = []
   const controlled: WindowAction[] = []
@@ -85,6 +96,20 @@ function setup(
         return DEFAULT_PROJECT
       },
     },
+    fix: {
+      status: () => ({ running: null as FixKind | null }),
+      test: async (...given: unknown[]) => {
+        fixed.push(`test(${given.length})`)
+        return DONE("test")
+      },
+      find: async (...given: unknown[]) => {
+        fixed.push(`find(${given.length})`)
+        return DONE("fix")
+      },
+      cancel: async (...given: unknown[]) => {
+        fixed.push(`cancel(${given.length})`)
+      },
+    },
     fetchFn,
     window: {
       chooseFolder: async () => {
@@ -111,6 +136,7 @@ function setup(
     opened,
     requests,
     started,
+    fixed,
     shown,
     placed,
     controlled,
@@ -288,6 +314,30 @@ describe("the project folder", () => {
     const { handlers, resets } = setup()
     expect(await handlers["project:reset"]()).toEqual(DEFAULT_PROJECT)
     expect(resets()).toBe(1)
+  })
+})
+
+describe("the fix", () => {
+  it("says what is running", async () => {
+    const { handlers } = setup()
+    expect(await handlers["fix:status"]()).toEqual({ running: null })
+  })
+
+  it("runs the tests and looks for a fix with what the system decides, never with what the page says", async () => {
+    const { handlers, fixed } = setup()
+    const fromPage = ["--apply", "rm -rf /", { command: "anything" }]
+    const asPage = (name: "fix:test" | "fix:find" | "fix:cancel") =>
+      (handlers[name] as (...values: unknown[]) => Promise<unknown>)(...fromPage)
+    expect(await asPage("fix:test")).toEqual(DONE("test"))
+    expect(await asPage("fix:find")).toEqual(DONE("fix"))
+    await asPage("fix:cancel")
+    expect(fixed).toEqual(["test(0)", "find(0)", "cancel(0)"])
+  })
+
+  it("is a section the page may show", async () => {
+    const { handlers, shown } = setup()
+    await handlers["section:show"]("fix")
+    expect(shown).toEqual(["fix"])
   })
 })
 

@@ -1,5 +1,8 @@
 import type {
   DockerStatus,
+  FixKind,
+  FixOutcome,
+  FixResult,
   HealerApi,
   KeyCheck,
   KeySave,
@@ -54,6 +57,7 @@ export const STATE_LABELS: Record<Tone, string> = {
 export const SECTIONS: ReadonlyArray<{ id: Section; label: string }> = [
   { id: "panel", label: "Panel" },
   { id: "project", label: "Project" },
+  { id: "fix", label: "Fix" },
   { id: "settings", label: "Settings" },
 ]
 
@@ -376,6 +380,102 @@ export const PROJECT_CHECK_FAILED: Notice = {
   text: "The app could not do that. Try again.",
 }
 
+/** Whether the tests can be run now: Docker, the services and the folder are all in order. */
+export function canFix(
+  docker: DockerStatus | null,
+  stack: StackStatus | null,
+  project: ProjectInfo | null,
+): boolean {
+  return (
+    docker?.ok === true &&
+    stack?.running === true &&
+    stack.workspaceMatches !== false &&
+    project !== null &&
+    project.problem === ""
+  )
+}
+
+export function fixCard(
+  docker: DockerStatus | null,
+  stack: StackStatus | null,
+  project: ProjectInfo | null,
+  running: FixKind | null,
+): Card {
+  if (running !== null) {
+    return {
+      tone: "idle",
+      title: running === "test" ? "Running the tests…" : "Looking for a fix…",
+      lines: [
+        "It can take a few minutes. What the system prints is shown below.",
+        "Your files are not changed.",
+      ],
+    }
+  }
+  if (docker !== null && !docker.ok) {
+    return {
+      tone: "warn",
+      title: "Docker is not working",
+      lines: ["Open Settings to see why."],
+    }
+  }
+  if (docker === null || project === null) {
+    return { tone: "idle", title: "Checking your project…", lines: [] }
+  }
+  if (project.problem !== "") {
+    return {
+      tone: "bad",
+      title: "The project folder cannot be used",
+      lines: [project.problem, "Choose it again in Project."],
+    }
+  }
+  if (stack?.running !== true) {
+    return {
+      tone: "warn",
+      title: "The services are stopped",
+      lines: ["Start them in Settings to run the tests of your project."],
+    }
+  }
+  if (stack.workspaceMatches === false) {
+    return {
+      tone: "warn",
+      title: "The services use another folder",
+      lines: [`Restart them in Settings to work on ${folderName(project.folder)}.`],
+    }
+  }
+  return {
+    tone: "good",
+    title: `Ready: ${folderName(project.folder)}`,
+    lines: [
+      project.folder,
+      "The tests run on a copy of the project. Looking for a fix does not change your files either: the fix is only saved.",
+    ],
+  }
+}
+
+const FIX_TITLES: Record<FixOutcome, { tone: Tone; title: string } | null> = {
+  passed: { tone: "good", title: "The tests pass" },
+  failed: { tone: "warn", title: "The tests fail" },
+  fixed: { tone: "good", title: "A fix was found" },
+  nothing: { tone: "good", title: "Nothing to fix" },
+  unfixed: { tone: "warn", title: "No fix was found" },
+  cancelled: { tone: "warn", title: "Stopped" },
+  declined: null,
+  refused: { tone: "warn", title: "It was not started" },
+  error: { tone: "bad", title: "It could not run" },
+}
+
+/** What to tell after a run. Nothing when the user said no in the dialog. */
+export function fixNotice(result: FixResult): Notice | null {
+  const said = FIX_TITLES[result.outcome]
+  return said === null ? null : { tone: said.tone, title: said.title, text: result.message }
+}
+
+export const FIX_FAILED: FixResult = {
+  kind: "test",
+  outcome: "error",
+  message: "The app could not do that. Try again.",
+}
+
 /** Shown in place of the panel when it cannot be loaded. */
 export const PANEL_DOWN: Card = {
   tone: "warn",
@@ -401,6 +501,9 @@ export const ICONS = {
   logo: ["M5 19c0-8 5-13 14-14 0 9-5 14-14 14z", "M5 19l7-7"],
   menu: ["M4 6h16", "M4 12h16", "M4 18h16"],
   project: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+  fix: [
+    "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
+  ],
   panel: ["M4 4h7v9H4z", "M13 4h7v5h-7z", "M13 11h7v9h-7z", "M4 15h7v5H4z"],
   settings: [
     "M4 7h9",
@@ -539,11 +642,14 @@ function main(): void {
   const views = {
     loading: byId("loading"),
     project: byId("project"),
+    fix: byId("fix"),
     settings: byId("settings"),
     note: byId("panel-note"),
   }
   const sections = {
     project: byId("project-card"),
+    fix: byId("fix-card"),
+    fixLog: byId("fix-log"),
     docker: byId("docker"),
     key: byId("key"),
     stack: byId("stack"),
@@ -551,6 +657,7 @@ function main(): void {
   }
   const keyMessage = new Message()
   const projectMessage = new Message()
+  const fixMessage = new Message()
   const state = {
     view: "loading" as "loading" | Section,
     initial: true,
@@ -561,6 +668,9 @@ function main(): void {
     key: null as KeyStatus | null,
     project: null as ProjectInfo | null,
     choosing: false,
+    /** What is running on the project now, and whether it was asked to stop. */
+    fix: null as FixKind | null,
+    stopping: false,
     stack: null as StackStatus | null,
     busy: false,
     message: "",
@@ -675,6 +785,7 @@ function main(): void {
   function renderView(): void {
     views.loading.hidden = state.view !== "loading"
     views.project.hidden = state.view !== "project"
+    views.fix.hidden = state.view !== "fix"
     views.settings.hidden = state.view !== "settings"
     const down = state.view === "panel" && state.panelFailed
     views.note.hidden = !down
@@ -699,6 +810,7 @@ function main(): void {
   function render(): void {
     renderControls()
     renderProject()
+    renderFix()
     renderDocker()
     renderKey()
     renderStack()
@@ -733,6 +845,88 @@ function main(): void {
     draw(sections.project, projectCard(info, state.stack), ...controls)
   }
 
+  function renderFix(): void {
+    const controls: Node[] = []
+    if (fixMessage.notice !== null && state.fix === null) {
+      controls.push(
+        banner(fixMessage.notice, () => {
+          fixMessage.dismiss()
+          renderFix()
+        }),
+      )
+    }
+    const ready = canFix(state.docker, state.stack, state.project) && !state.busy
+    if (state.fix !== null) {
+      controls.push(
+        ...actions(
+          button(
+            state.stopping ? "Stopping…" : "Stop",
+            () => void stopFix(),
+            "secondary",
+            state.stopping,
+          ),
+        ),
+      )
+    } else {
+      controls.push(
+        ...actions(
+          button("Run the tests", () => void runFix("test"), "primary", !ready),
+          button("Look for a fix", () => void runFix("fix"), "secondary", !ready),
+          ...(ready ? [] : [button("Open Settings", () => void go("settings"), "ghost")]),
+        ),
+      )
+    }
+    draw(sections.fix, fixCard(state.docker, state.stack, state.project, state.fix), ...controls)
+  }
+
+  /** What was run belonged to another project once the project changes. */
+  function clearFix(): void {
+    if (state.fix === null) {
+      fixMessage.dismiss()
+      sections.fixLog.textContent = ""
+      sections.fixLog.hidden = true
+    }
+  }
+
+  async function runFix(kind: FixKind): Promise<void> {
+    if (state.fix !== null) {
+      return
+    }
+    state.fix = kind
+    state.stopping = false
+    fixMessage.dismiss()
+    sections.fixLog.textContent = ""
+    sections.fixLog.hidden = true
+    render()
+    const stopListening = api.onFixLine((line) => append(sections.fixLog, line))
+    let result: FixResult
+    try {
+      result = await (kind === "test" ? api.fixTest() : api.fixFind())
+    } catch {
+      result = { ...FIX_FAILED, kind }
+    }
+    stopListening()
+    state.fix = null
+    state.stopping = false
+    const notice = fixNotice(result)
+    if (notice !== null) {
+      fixMessage.show(notice)
+    }
+    if (result.outcome === "refused") {
+      await refreshStack()
+    }
+    render()
+  }
+
+  async function stopFix(): Promise<void> {
+    if (state.fix === null || state.stopping) {
+      return
+    }
+    state.stopping = true
+    renderFix()
+    await api.fixCancel().catch(() => undefined)
+  }
+
   /** What a restart of the services would apply: a new key, and a folder they do not have yet. */
   function waiting(): Waiting[] {
     return [
@@ -760,6 +954,9 @@ function main(): void {
     try {
       const choice = await api.projectChoose()
       state.project = choice.project
+      if (choice.changed) {
+        clearFix()
+      }
       const notice = projectNotice(choice, state.stack?.running === true)
       if (notice !== null) {
         projectMessage.show(notice)
@@ -780,6 +977,7 @@ function main(): void {
     renderProject()
     try {
       state.project = await api.projectReset()
+      clearFix()
       projectMessage.show(PROJECT_RESET_NOTICE)
     } catch {
       projectMessage.show(PROJECT_CHECK_FAILED)
@@ -843,6 +1041,8 @@ function main(): void {
 
   function renderStack(): void {
     const docker = state.docker
+    /** Whether the button would start or restart the services, which would cut a run short. */
+    const restarts = waiting().length > 0 || state.stack?.running !== true
     const label =
       waiting().length > 0
         ? "Restart and open the panel"
@@ -853,9 +1053,21 @@ function main(): void {
       sections.stack,
       stackCard(state.stack, state.busy, state.message, waiting()),
       ...actions(
-        button(label, () => void start(), "primary", !canStart(docker, state.busy)),
+        button(
+          label,
+          () => void start(),
+          "primary",
+          !canStart(docker, state.busy) || (state.fix !== null && restarts),
+        ),
         ...(state.stack?.services.length
-          ? [button("Stop the services", () => void stop(), "ghost", state.busy)]
+          ? [
+              button(
+                "Stop the services",
+                () => void stop(),
+                "ghost",
+                state.busy || state.fix !== null,
+              ),
+            ]
           : []),
       ),
     )
@@ -900,12 +1112,16 @@ function main(): void {
     render()
   }
 
-  function show(line: string): void {
-    sections.log.hidden = false
-    const lines = (sections.log.textContent ?? "").split("\n").concat(line).slice(-200)
-    sections.log.textContent = lines.join("\n")
-    sections.log.scrollTop = sections.log.scrollHeight
+  /** Adds a line to the end of a log, keeping the last 200. */
+  function append(log: HTMLElement, line: string): void {
+    const before = log.textContent ?? ""
+    log.hidden = false
+    const lines = (before === "" ? [] : before.split("\n")).concat(line).slice(-200)
+    log.textContent = lines.join("\n")
+    log.scrollTop = log.scrollHeight
   }
+
+  const show = (line: string): void => append(sections.log, line)
 
   /** The result of an action of the services, or a plain failure if it broke in the middle. */
   async function attempt(call: () => Promise<StackResult>): Promise<StackResult> {
@@ -960,6 +1176,7 @@ function main(): void {
     state.project = await api.projectStatus().catch(() => null)
     state.docker = await api.dockerCheck()
     state.stack = state.docker.ok ? await api.stackStatus() : null
+    state.fix = (await api.fixStatus().catch(() => ({ running: null }))).running
     render()
     if (state.initial) {
       state.initial = false
