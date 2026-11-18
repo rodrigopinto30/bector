@@ -1,8 +1,10 @@
 import type {
   DockerStatus,
+  FixEdit,
   FixKind,
   FixOutcome,
   FixResult,
+  FixReview,
   HealerApi,
   KeyCheck,
   KeySave,
@@ -401,6 +403,16 @@ export function fixCard(
   project: ProjectInfo | null,
   running: FixKind | null,
 ): Card {
+  if (running === "apply") {
+    return {
+      tone: "idle",
+      title: "Applying the fix…",
+      lines: [
+        "The system tests it again on a copy first, and writes your files only if the tests pass.",
+        "What the system prints is shown below.",
+      ],
+    }
+  }
   if (running !== null) {
     return {
       tone: "idle",
@@ -456,6 +468,8 @@ const FIX_TITLES: Record<FixOutcome, { tone: Tone; title: string } | null> = {
   passed: { tone: "good", title: "The tests pass" },
   failed: { tone: "warn", title: "The tests fail" },
   fixed: { tone: "good", title: "A fix was found" },
+  applied: { tone: "good", title: "Fix applied" },
+  blocked: { tone: "warn", title: "Not applied" },
   nothing: { tone: "good", title: "Nothing to fix" },
   unfixed: { tone: "warn", title: "No fix was found" },
   cancelled: { tone: "warn", title: "Stopped" },
@@ -468,6 +482,48 @@ const FIX_TITLES: Record<FixOutcome, { tone: Tone; title: string } | null> = {
 export function fixNotice(result: FixResult): Notice | null {
   const said = FIX_TITLES[result.outcome]
   return said === null ? null : { tone: said.tone, title: said.title, text: result.message }
+}
+
+/** One line of what a fix changes: text it takes out, or text it puts in. */
+export interface DiffLine {
+  kind: "removed" | "added"
+  text: string
+}
+
+/** The lines of one change of a fix: first those it removes, then those it adds. */
+export function diffLines(edit: FixEdit): DiffLine[] {
+  const side = (text: string, kind: DiffLine["kind"]): DiffLine[] =>
+    text === ""
+      ? []
+      : text
+          .replace(/\n$/, "")
+          .split("\n")
+          .map((line) => ({ kind, text: line }))
+  return [...side(edit.old, "removed"), ...side(edit.new, "added")]
+}
+
+const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? "" : "s"}`
+
+/** For example "1 file, 2 lines removed and 3 added". */
+export function reviewSummary(review: FixReview): string {
+  const lines = review.edits.flatMap(diffLines)
+  const removed = lines.filter((line) => line.kind === "removed").length
+  const added = lines.length - removed
+  const files = new Set(review.edits.map((edit) => edit.path)).size
+  return `${plural(files, "file")}, ${plural(removed, "line")} removed and ${added} added`
+}
+
+/** The card of the fix that is about to be applied. It warns because it will change files. */
+export function reviewCard(review: FixReview): Card {
+  return {
+    tone: "warn",
+    title: "Review the fix before it is applied",
+    lines: [
+      ...(review.description === "" ? [] : [review.description]),
+      reviewSummary(review),
+      "Your files are not changed yet.",
+    ],
+  }
 }
 
 export const FIX_FAILED: FixResult = {
@@ -649,6 +705,7 @@ function main(): void {
   const sections = {
     project: byId("project-card"),
     fix: byId("fix-card"),
+    review: byId("fix-review"),
     fixLog: byId("fix-log"),
     docker: byId("docker"),
     key: byId("key"),
@@ -671,6 +728,10 @@ function main(): void {
     /** What is running on the project now, and whether it was asked to stop. */
     fix: null as FixKind | null,
     stopping: false,
+    /** A fix is saved, and the one being shown for review, with its card waiting for an answer. */
+    saved: false,
+    review: null as FixReview | null,
+    reviewing: false,
     stack: null as StackStatus | null,
     busy: false,
     message: "",
@@ -811,6 +872,7 @@ function main(): void {
     renderControls()
     renderProject()
     renderFix()
+    renderReview()
     renderDocker()
     renderKey()
     renderStack()
@@ -856,7 +918,9 @@ function main(): void {
       )
     }
     const ready = canFix(state.docker, state.stack, state.project) && !state.busy
-    if (state.fix !== null) {
+    if (state.fix === "apply") {
+      // Applying is over in a moment and is not to be left half done: there is nothing to stop.
+    } else if (state.fix !== null) {
       controls.push(
         ...actions(
           button(
@@ -868,9 +932,25 @@ function main(): void {
         ),
       )
     } else {
+      const review = ready && state.saved && state.review === null
       controls.push(
         ...actions(
-          button("Run the tests", () => void runFix("test"), "primary", !ready),
+          ...(review
+            ? [
+                button(
+                  state.reviewing ? "Opening…" : "Review the fix",
+                  () => void reviewFix(),
+                  "primary",
+                  state.reviewing,
+                ),
+              ]
+            : []),
+          button(
+            "Run the tests",
+            () => void runFix("test"),
+            review ? "secondary" : "primary",
+            !ready,
+          ),
           button("Look for a fix", () => void runFix("fix"), "secondary", !ready),
           ...(ready ? [] : [button("Open Settings", () => void go("settings"), "ghost")]),
         ),
@@ -885,10 +965,61 @@ function main(): void {
       fixMessage.dismiss()
       sections.fixLog.textContent = ""
       sections.fixLog.hidden = true
+      state.review = null
+      state.saved = false
     }
   }
 
-  async function runFix(kind: FixKind): Promise<void> {
+  async function runFix(kind: "test" | "fix"): Promise<void> {
+    if (kind === "fix") {
+      // A new search replaces the saved fix, so the one on screen is about to be gone.
+      state.review = null
+    }
+    await perform(kind, () => (kind === "test" ? api.fixTest() : api.fixFind()))
+  }
+
+  /** Asks for the saved fix, to show it. Nothing is changed. */
+  async function reviewFix(): Promise<void> {
+    if (state.fix !== null || state.reviewing) {
+      return
+    }
+    state.reviewing = true
+    fixMessage.dismiss()
+    renderFix()
+    try {
+      const shown = await api.fixReview()
+      if (shown.review === null) {
+        state.saved = false
+        fixMessage.show({ tone: "warn", title: "There is no fix to review", text: shown.message })
+      } else {
+        state.review = shown.review
+      }
+    } catch {
+      fixMessage.show(fixNotice(FIX_FAILED) ?? CHECKING_NOTICE)
+    }
+    state.reviewing = false
+    render()
+    sections.review.scrollIntoView({ block: "nearest" })
+  }
+
+  /** The user says yes in a dialog of the app, and only the fix that was shown is applied. */
+  async function applyFix(): Promise<void> {
+    const review = state.review
+    if (review === null) {
+      return
+    }
+    await perform("apply", () => api.fixApply(review.id))
+  }
+
+  function closeReview(): void {
+    if (state.fix === null) {
+      state.review = null
+      renderFix()
+      renderReview()
+    }
+  }
+
+  async function perform(kind: FixKind, call: () => Promise<FixResult>): Promise<void> {
     if (state.fix !== null) {
       return
     }
@@ -901,7 +1032,7 @@ function main(): void {
     const stopListening = api.onFixLine((line) => append(sections.fixLog, line))
     let result: FixResult
     try {
-      result = await (kind === "test" ? api.fixTest() : api.fixFind())
+      result = await call()
     } catch {
       result = { ...FIX_FAILED, kind }
     }
@@ -912,10 +1043,59 @@ function main(): void {
     if (notice !== null) {
       fixMessage.show(notice)
     }
+    if (kind === "apply" && result.outcome !== "declined") {
+      state.review = null
+    }
+    state.saved = (await api.fixStatus().catch(() => ({ running: null, saved: false }))).saved
     if (result.outcome === "refused") {
       await refreshStack()
     }
     render()
+  }
+
+  /** The fix, file by file, as it will be applied: what it takes out and what it puts in. */
+  function renderReview(): void {
+    const review = state.review
+    sections.review.hidden = review === null
+    if (review === null) {
+      sections.review.replaceChildren()
+      return
+    }
+    const applying = state.fix === "apply"
+    const edits = review.edits.map((edit) =>
+      node(
+        "div",
+        "edit",
+        "",
+        node("p", "edit-path", edit.path),
+        node(
+          "pre",
+          "diff",
+          "",
+          ...diffLines(edit).map((line) =>
+            node(
+              "span",
+              `diff-line ${line.kind}`,
+              `${line.kind === "removed" ? "-" : "+"} ${line.text}`,
+            ),
+          ),
+        ),
+      ),
+    )
+    draw(
+      sections.review,
+      reviewCard(review),
+      ...edits,
+      ...actions(
+        button(
+          applying ? "Applying…" : "Apply to my project",
+          () => void applyFix(),
+          "primary",
+          state.fix !== null,
+        ),
+        button("Close", closeReview, "ghost", applying),
+      ),
+    )
   }
 
   async function stopFix(): Promise<void> {
@@ -1176,7 +1356,9 @@ function main(): void {
     state.project = await api.projectStatus().catch(() => null)
     state.docker = await api.dockerCheck()
     state.stack = state.docker.ok ? await api.stackStatus() : null
-    state.fix = (await api.fixStatus().catch(() => ({ running: null }))).running
+    const fixing = await api.fixStatus().catch(() => ({ running: null, saved: false }))
+    state.fix = fixing.running
+    state.saved = fixing.saved
     render()
     if (state.initial) {
       state.initial = false

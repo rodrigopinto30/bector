@@ -5,6 +5,8 @@ export interface RunOptions {
   /** Added to the environment of the program. Never put in its arguments. */
   env?: Record<string, string>
   timeoutMs?: number
+  /** Written to the program's standard input, which is then closed. Without it, it is closed. */
+  input?: string
   /** Called with each line the program prints, on either output. */
   onLine?: (line: string) => void
 }
@@ -41,9 +43,13 @@ export const run: Run = (file, args, options = {}) =>
     const child = spawn(file, [...args], {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     })
+    // The input is closed at once when there is none, as if the program had no input at all. A
+    // program that ends without reading its input is not an error of ours.
+    child.stdin.on("error", () => undefined)
+    child.stdin.end(options.input)
     const timer =
       options.timeoutMs === undefined
         ? null

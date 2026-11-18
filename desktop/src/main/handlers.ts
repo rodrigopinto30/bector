@@ -2,6 +2,7 @@ import type {
   Bounds,
   DockerStatus,
   FixResult,
+  FixReviewResult,
   FixStatus,
   KeySave,
   KeyStatus,
@@ -15,6 +16,7 @@ import type {
 import type { Fixer } from "./fix"
 import { checkKey, isUsable, normalizeKey, type Fetch } from "./key"
 import { isSection, isWindowAction, parseBounds } from "./layout"
+import { isPatchId } from "./patch"
 import { isAllowedExternal } from "./policy"
 import type { Stack } from "./stack"
 import { VaultError, type KeyVault } from "./vault"
@@ -28,7 +30,7 @@ export interface HandlerDeps {
   vault: Pick<KeyVault, "status" | "save" | "remove">
   stack: Pick<Stack, "status" | "start" | "stop">
   workspace: Pick<Workspace, "info" | "choose" | "reset">
-  fix: Pick<Fixer, "status" | "test" | "find" | "cancel">
+  fix: Pick<Fixer, "status" | "test" | "find" | "review" | "apply" | "forget" | "cancel">
   fetchFn: Fetch
   /** The window: which section it shows, where its content is, and its own buttons. */
   window: {
@@ -95,14 +97,32 @@ export function createHandlers(deps: HandlerDeps) {
       if (folder === null) {
         return { changed: false, message: "", project: await deps.workspace.info() }
       }
-      return deps.workspace.choose(folder)
+      const choice = await deps.workspace.choose(folder)
+      if (choice.changed) {
+        await deps.fix.forget()
+      }
+      return choice
     },
-    "project:reset": (): Promise<ProjectInfo> => deps.workspace.reset(),
-    "fix:status": async (): Promise<FixStatus> => deps.fix.status(),
+    "project:reset": async (): Promise<ProjectInfo> => {
+      const project = await deps.workspace.reset()
+      await deps.fix.forget()
+      return project
+    },
+    "fix:status": (): Promise<FixStatus> => deps.fix.status(),
     "fix:test": (): Promise<FixResult> => deps.fix.test(),
     // Asking before Claude is used is the job of the main process, not of the page: whatever
     // the page asks, it is the dialog of the app that decides.
     "fix:find": (): Promise<FixResult> => deps.fix.find(),
+    "fix:review": (): Promise<FixReviewResult> => deps.fix.review(),
+    // The page gives back only the id of the fix it was shown. The fix itself is read by the main
+    // process, and is applied only if it is that one, after the user says yes in a dialog of the
+    // app: the page cannot give a patch, a path or an option.
+    "fix:apply": (id: unknown): Promise<FixResult> => {
+      if (!isPatchId(id)) {
+        throw new Error("that is not the id of a fix")
+      }
+      return deps.fix.apply(id)
+    },
     "fix:cancel": (): Promise<void> => deps.fix.cancel(),
     "section:show": async (section: unknown): Promise<void> => {
       if (!isSection(section)) {
