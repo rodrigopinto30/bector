@@ -14,7 +14,8 @@ Usage:
   ./panel.sh check    format, lint, types, tests and build, as CI runs them
   ./panel.sh quick    the same without the build, as the pre-commit hook runs them
   ./panel.sh format   rewrite the files of panel/ in the project style
-  ./panel.sh audit    check the locked packages against the known vulnerabilities
+  ./panel.sh audit    check the locked packages against the known vulnerabilities, with
+                      only the exceptions of panel/audit-exceptions.txt
   ./panel.sh dev      a panel that reloads on every change, at http://localhost:3000,
                       with the data of the running panel container (./start.sh first)
   ./panel.sh demo     real events, one at a time, on a demo panel at http://localhost:8766;
@@ -67,7 +68,12 @@ case "${1:-}" in
     in_node "$NODE_IMAGE" npm run --silent format
     ;;
   audit)
-    in_node "$NODE_IMAGE" npm audit
+    # What ships must have no advisory; the development tools may have only those listed, with
+    # a reason, in audit-exceptions.txt. The filter's own tests run first, since it is the gate.
+    in_node -v "$PWD/scripts:/scripts:ro" "$NODE_IMAGE" sh -c \
+      'node --test --test-reporter=dot /scripts/npm-audit.test.mjs >/dev/null 2>&1 ||
+        { node --test /scripts/npm-audit.test.mjs; exit 1; }
+       node /scripts/npm-audit.mjs audit-exceptions.txt'
     ;;
   dev)
     install

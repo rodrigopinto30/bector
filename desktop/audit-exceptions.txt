@@ -1,0 +1,9 @@
+# Advisories of npm audit that do not apply to this project, one per line: the id, then the
+# reason. ./desktop.sh audit ignores only these, and only in the development tools: an advisory in
+# what ships is never ignored, listed or not. Review them on every upgrade, and remove an entry as
+# soon as a fixed version is locked: the audit says when one is no longer reported.
+#
+# picomatch 4.0.7 is the latest version and is affected. It is reached only through vitest, vite and typescript-eslint, which
+# run on a developer's computer or in CI, on this project's own patterns. The audit of what ships
+# finds nothing.
+GHSA-fc5q-39xc-vjpf  picomatch ReDoS through repeated extglobs, no fixed version yet; only in the development tools

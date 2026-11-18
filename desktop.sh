@@ -15,7 +15,8 @@ Usage:
   ./desktop.sh check     format, lint, types, tests and build, as CI runs them
   ./desktop.sh quick     the same without the build, as the pre-commit hook runs them
   ./desktop.sh format    rewrite the files of desktop/ in the project style
-  ./desktop.sh audit     check the locked packages against the known vulnerabilities
+  ./desktop.sh audit     check the locked packages against the known vulnerabilities, with
+                         only the exceptions of desktop/audit-exceptions.txt
   ./desktop.sh electron  download the Electron program (270 MB unpacked), after asking you
   ./desktop.sh run       build the app and open it on your desktop. Add --no-sandbox only if
                          Chromium's sandbox fails (Ubuntu 24.04 restricts it): it is weaker
@@ -90,7 +91,12 @@ case "${1:-}" in
     in_node "$NODE_IMAGE" npm run --silent format
     ;;
   audit)
-    in_node "$NODE_IMAGE" npm audit
+    # What ships must have no advisory; the development tools may have only those listed, with
+    # a reason, in audit-exceptions.txt. The filter's own tests run first, since it is the gate.
+    in_node -v "$PWD/scripts:/scripts:ro" "$NODE_IMAGE" sh -c \
+      'node --test --test-reporter=dot /scripts/npm-audit.test.mjs >/dev/null 2>&1 ||
+        { node --test /scripts/npm-audit.test.mjs; exit 1; }
+       node /scripts/npm-audit.mjs audit-exceptions.txt'
     ;;
   electron)
     install
