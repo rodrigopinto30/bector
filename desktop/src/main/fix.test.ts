@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import type { StackStatus } from "../shared/api"
 import { clean, explain, Fixer, PATCH_FILE, type FixDeps, type Question } from "./fix"
+import { patchId } from "./patch"
 import type { Run, RunOptions, RunResult } from "./process"
 
 const ROOT = "/home/pc/healer"
@@ -13,9 +14,19 @@ const UP: StackStatus = {
   workspaceMatches: true,
 }
 
-function result(code: number | null, failed = ""): RunResult {
-  return { code, stdout: "", stderr: "", failed }
+function result(code: number | null, failed = "", stdout = ""): RunResult {
+  return { code, stdout, stderr: "", failed }
 }
+
+/** A fix as the system saves it. */
+function saved(...paths: string[]): string {
+  return JSON.stringify({
+    edits: paths.map((path) => ({ path, old: "return a - b", new: "return a + b" })),
+    description: "sumar must add",
+  })
+}
+
+const PATCH = saved("app.py")
 
 interface Options {
   stack?: StackStatus
@@ -30,6 +41,10 @@ interface Options {
   killMisses?: number
   /** The sandbox cannot be restarted. */
   sandboxFails?: boolean
+  /** The text of the saved fix, or null when there is none. */
+  patch?: string | null
+  /** The program in the container waits until the test opens the gate. */
+  gate?: boolean
 }
 
 /** A computer with the services as given, and a container that runs what it is told. */
@@ -42,6 +57,14 @@ function computer(options: Options = {}) {
   let release: (() => void) | null = null
   let started: (() => void) | null = null
   let removed = 0
+  let patch = options.patch ?? null
+  const inputs: string[] = []
+  let open: () => void = () => undefined
+  const gate = options.gate
+    ? new Promise<void>((resolve) => {
+        open = resolve
+      })
+    : null
   const hold =
     options.code === undefined && options.prints === undefined && options.failed === undefined
   const run: Run = async (file, args, runOptions: RunOptions = {}) => {
@@ -57,6 +80,9 @@ function computer(options: Options = {}) {
     if (line.includes("test -s /data/healer/fix.json")) {
       return result(options.saved ? 0 : 1)
     }
+    if (line.endsWith(" cat /data/healer/fix.json")) {
+      return patch === null ? result(1) : result(0, "", patch)
+    }
     if (line === "docker compose restart -t 2 sandbox") {
       return result(options.sandboxFails ? 1 : 0)
     }
@@ -68,10 +94,16 @@ function computer(options: Options = {}) {
       release?.()
       return result(0)
     }
+    if (runOptions.input !== undefined) {
+      inputs.push(runOptions.input)
+    }
     for (const text of options.prints ?? []) {
       runOptions.onLine?.(text)
     }
     started?.()
+    if (gate !== null) {
+      await gate
+    }
     if (hold) {
       await new Promise<void>((resolve) => {
         release = resolve
@@ -84,6 +116,7 @@ function computer(options: Options = {}) {
     root: ROOT,
     run,
     stack: async () => options.stack ?? UP,
+    project: async () => "/home/ana/shop",
     confirm: async (question) => {
       questions.push(question)
       return options.answer ?? true
@@ -103,6 +136,12 @@ function computer(options: Options = {}) {
     questions,
     slept,
     waitForStart,
+    inputs,
+    open: () => open(),
+    /** The saved fix is replaced by another, as when someone looks for a fix in a terminal. */
+    replace: (text: string | null) => {
+      patch = text
+    },
     removed: () => removed,
     execs: () => calls.filter((call) => call.includes(" healer ")),
   }
@@ -325,13 +364,13 @@ describe("looking for a fix", () => {
 describe("one run at a time, and stopping it", () => {
   it("says what is running", async () => {
     const { fixer, waitForStart } = computer()
-    expect(fixer.status()).toEqual({ running: null })
+    expect(await fixer.status()).toEqual({ running: null, saved: false })
     const running = fixer.test()
     await waitForStart
-    expect(fixer.status()).toEqual({ running: "test" })
+    expect(await fixer.status()).toEqual({ running: "test", saved: false })
     await fixer.cancel()
     await running
-    expect(fixer.status()).toEqual({ running: null })
+    expect(await fixer.status()).toEqual({ running: null, saved: false })
   })
 
   it("refuses a second run while one is going", async () => {
@@ -438,6 +477,7 @@ describe("one run at a time, and stopping it", () => {
         new Promise((resolve) => {
           gate.open = () => resolve(UP)
         }),
+      project: async () => "/home/ana/shop",
       confirm: async () => true,
       sleep: async () => undefined,
       onLine: () => undefined,
@@ -448,5 +488,241 @@ describe("one run at a time, and stopping it", () => {
     gate.open()
     expect((await running).outcome).toBe("cancelled")
     expect(calls).toEqual([])
+  })
+})
+
+describe("the saved fix", () => {
+  it("says whether there is one, when nothing runs", async () => {
+    expect(await computer({ saved: true }).fixer.status()).toEqual({ running: null, saved: true })
+    expect(await computer({ saved: false }).fixer.status()).toEqual({ running: null, saved: false })
+  })
+
+  it("says what runs, and does not look at the fix meanwhile", async () => {
+    const { fixer, waitForStart, calls } = computer({ saved: true })
+    const running = fixer.test()
+    await waitForStart
+    const before = calls.length
+    expect(await fixer.status()).toEqual({ running: "test", saved: false })
+    expect(calls.length).toBe(before)
+    await fixer.cancel()
+    await running
+  })
+
+  it("is shown as it will be applied, with an id that names exactly it", async () => {
+    const { fixer, questions } = computer({ patch: PATCH })
+    const shown = await fixer.review()
+    expect(shown).toEqual({
+      review: {
+        id: patchId(PATCH),
+        description: "sumar must add",
+        edits: [{ path: "app.py", old: "return a - b", new: "return a + b" }],
+      },
+      message: "",
+    })
+    expect(questions).toEqual([])
+  })
+
+  it("is not shown when there is none, when it cannot be read, or when the services are not ready", async () => {
+    expect((await computer({ patch: null }).fixer.review()).message).toBe(
+      "There is no saved fix. Look for one first.",
+    )
+    expect((await computer({ patch: "{" }).fixer.review()).message).toBe(
+      "The saved fix could not be read. Look for a fix again.",
+    )
+    const stopped: StackStatus = { ...UP, running: false, keySeen: null, workspaceMatches: null }
+    const down = computer({ patch: PATCH, stack: stopped })
+    expect((await down.fixer.review()).message).toBe(
+      "The services are stopped. Start them in Settings first.",
+    )
+    expect(down.calls).toEqual([])
+    const other = computer({ patch: PATCH, stack: { ...UP, workspaceMatches: false } })
+    expect((await other.fixer.review()).message).toContain("another folder")
+  })
+
+  it("is not shown while something runs", async () => {
+    const { fixer, waitForStart } = computer({ patch: PATCH })
+    const running = fixer.test()
+    await waitForStart
+    expect((await fixer.review()).message).toContain("already running")
+    await fixer.cancel()
+    await running
+  })
+
+  it("goes when the project changes, but not while something runs", async () => {
+    const idle = computer()
+    await idle.fixer.forget()
+    expect(idle.calls).toEqual(["docker compose exec -T cli rm -f /data/healer/fix.json"])
+    const busy = computer()
+    const running = busy.fixer.test()
+    await busy.waitForStart
+    const before = busy.calls.length
+    await busy.fixer.forget()
+    expect(busy.calls.length).toBe(before)
+    await busy.fixer.cancel()
+    await running
+  })
+})
+
+describe("applying the fix", () => {
+  const id = patchId(PATCH)
+
+  it("asks first, in a dialog of the app, saying what changes, where, and that it keeps no copy", async () => {
+    const { fixer, questions } = computer({ patch: PATCH, code: 0 })
+    await fixer.apply(id)
+    expect(questions).toHaveLength(1)
+    expect(questions[0]).toMatchObject({
+      title: "Apply the fix",
+      message: "Apply this fix to your project?",
+      ok: "Apply the fix",
+    })
+    const detail = questions[0]?.detail ?? ""
+    expect(detail).toContain("1 file in /home/ana/shop: app.py")
+    expect(detail).toContain("tests the fix again on a copy first")
+    expect(detail).toContain("does not keep a copy of the originals")
+  })
+
+  it("counts the files, and does not list too many", async () => {
+    const many = saved("a.py", "b.py", "c.py", "d.py", "e.py", "a.py")
+    const { fixer, questions } = computer({ patch: many, code: 0 })
+    await fixer.apply(patchId(many))
+    expect(questions[0]?.detail).toContain("5 files in /home/ana/shop: a.py, b.py, c.py and 2 more")
+  })
+
+  it("changes nothing when the user says no", async () => {
+    const { fixer, execs, calls } = computer({ patch: PATCH, answer: false })
+    expect(await fixer.apply(id)).toEqual({
+      kind: "apply",
+      outcome: "declined",
+      message: "Your files were not changed.",
+    })
+    expect(execs()).toEqual([])
+    expect(calls.some((call) => call.includes("rm -f"))).toBe(false)
+  })
+
+  it("gives the system the text that was reviewed, and never a file to read again", async () => {
+    const { fixer, execs, inputs } = computer({ patch: PATCH, code: 0 })
+    await fixer.apply(id)
+    expect(execs()).toHaveLength(1)
+    expect(execs()[0]).toMatch(/ healer apply - --yes$/)
+    expect(execs()[0]).not.toContain("fix.json")
+    expect(inputs).toEqual([PATCH])
+  })
+
+  it("applies only the fix that was reviewed", async () => {
+    const { fixer, execs, questions, replace } = computer({ patch: PATCH, code: 0 })
+    replace(saved("other.py"))
+    expect(await fixer.apply(id)).toEqual({
+      kind: "apply",
+      outcome: "refused",
+      message: "The saved fix is not the one you reviewed. Review it again.",
+    })
+    expect(execs()).toEqual([])
+    expect(questions).toEqual([])
+  })
+
+  it("refuses when there is none, or it cannot be read, or the services are not ready", async () => {
+    expect((await computer({ patch: null }).fixer.apply(id)).message).toBe(
+      "There is no saved fix. Look for one first.",
+    )
+    const broken = computer({ patch: "{" })
+    expect((await broken.fixer.apply(patchId("{"))).message).toBe(
+      "The saved fix could not be read. Look for a fix again.",
+    )
+    const stopped: StackStatus = { ...UP, running: false, keySeen: null, workspaceMatches: null }
+    const down = computer({ patch: PATCH, stack: stopped })
+    expect((await down.fixer.apply(id)).outcome).toBe("refused")
+    expect(down.calls).toEqual([])
+    const other = computer({ patch: PATCH, stack: { ...UP, workspaceMatches: false } })
+    expect((await other.fixer.apply(id)).outcome).toBe("refused")
+    expect(other.questions).toEqual([])
+  })
+
+  it("asks even when the services have no key, because it writes to the project", async () => {
+    const { fixer, questions } = computer({
+      patch: PATCH,
+      code: 0,
+      stack: { ...UP, keySeen: false },
+    })
+    await fixer.apply(id)
+    expect(questions).toHaveLength(1)
+  })
+
+  it("says it was applied, and the saved fix goes", async () => {
+    const { fixer, calls, removed } = computer({ patch: PATCH, code: 0 })
+    const outcome = await fixer.apply(id)
+    expect(outcome.kind).toBe("apply")
+    expect(outcome.outcome).toBe("applied")
+    expect(outcome.message).toBe(
+      "The fix was applied to your project: app.py. Run the tests to see them pass.",
+    )
+    expect(removed()).toBe(1)
+    expect(calls.findIndex((call) => call.includes("healer apply"))).toBeLessThan(
+      calls.findIndex((call) => call.includes("rm -f /data/healer/fix.json")),
+    )
+  })
+
+  it("writes nothing and keeps the saved fix when the tests do not pass", async () => {
+    const { fixer, removed } = computer({ patch: PATCH, code: 1 })
+    const outcome = await fixer.apply(id)
+    expect(outcome.outcome).toBe("blocked")
+    expect(outcome.message).toContain("your files were not changed")
+    expect(removed()).toBe(0)
+  })
+
+  it("says why when the system could not apply it, and keeps the saved fix", async () => {
+    const { fixer, removed } = computer({
+      patch: PATCH,
+      code: 2,
+      prints: [
+        "error: not applied, your files were not changed: app.py: changed since the patch was tested",
+      ],
+    })
+    expect(await fixer.apply(id)).toEqual({
+      kind: "apply",
+      outcome: "error",
+      message:
+        "The fix could not be applied: not applied, your files were not changed: app.py: changed since the patch was tested",
+    })
+    expect(removed()).toBe(0)
+  })
+
+  it("does not say it was applied when the program could not run", async () => {
+    const { fixer, removed } = computer({ patch: PATCH, code: null, failed: "ENOENT" })
+    const outcome = await fixer.apply(id)
+    expect(outcome.outcome).toBe("error")
+    expect(outcome.message).toBe("The fix could not be applied: Docker could not be run.")
+    expect(removed()).toBe(0)
+  })
+
+  it("passes its output on, with a key hidden", async () => {
+    const { fixer, lines } = computer({
+      patch: PATCH,
+      code: 1,
+      prints: ["verdict    the tests still fail", `error ${KEY}`],
+    })
+    await fixer.apply(id)
+    expect(lines).toEqual(["verdict    the tests still fail", "error [hidden]"])
+  })
+
+  it("cannot be stopped, because it is not to be left half done", async () => {
+    const { fixer, waitForStart, calls, open } = computer({ patch: PATCH, code: 0, gate: true })
+    const applying = fixer.apply(id)
+    await waitForStart
+    expect(await fixer.status()).toEqual({ running: "apply", saved: false })
+    await fixer.cancel()
+    expect(calls.some((call) => call.includes("kill"))).toBe(false)
+    expect(calls.some((call) => call.includes("restart"))).toBe(false)
+    open()
+    expect((await applying).outcome).toBe("applied")
+  })
+
+  it("refuses a second run while it applies", async () => {
+    const { fixer, waitForStart, open } = computer({ patch: PATCH, code: 0, gate: true })
+    const applying = fixer.apply(id)
+    await waitForStart
+    expect((await fixer.test()).outcome).toBe("refused")
+    expect((await fixer.apply(id)).outcome).toBe("refused")
+    open()
+    await applying
   })
 })

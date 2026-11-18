@@ -97,7 +97,7 @@ function setup(
       },
     },
     fix: {
-      status: () => ({ running: null as FixKind | null }),
+      status: async () => ({ running: null as FixKind | null, saved: false }),
       test: async (...given: unknown[]) => {
         fixed.push(`test(${given.length})`)
         return DONE("test")
@@ -105,6 +105,17 @@ function setup(
       find: async (...given: unknown[]) => {
         fixed.push(`find(${given.length})`)
         return DONE("fix")
+      },
+      review: async (...given: unknown[]) => {
+        fixed.push(`review(${given.length})`)
+        return { review: null, message: "There is no saved fix. Look for one first." }
+      },
+      apply: async (...given: unknown[]) => {
+        fixed.push(`apply(${given.join(",")})`)
+        return DONE("apply")
+      },
+      forget: async () => {
+        fixed.push("forget")
       },
       cancel: async (...given: unknown[]) => {
         fixed.push(`cancel(${given.length})`)
@@ -320,7 +331,7 @@ describe("the project folder", () => {
 describe("the fix", () => {
   it("says what is running", async () => {
     const { handlers } = setup()
-    expect(await handlers["fix:status"]()).toEqual({ running: null })
+    expect(await handlers["fix:status"]()).toEqual({ running: null, saved: false })
   })
 
   it("runs the tests and looks for a fix with what the system decides, never with what the page says", async () => {
@@ -332,6 +343,57 @@ describe("the fix", () => {
     expect(await asPage("fix:find")).toEqual(DONE("fix"))
     await asPage("fix:cancel")
     expect(fixed).toEqual(["test(0)", "find(0)", "cancel(0)"])
+  })
+
+  it("shows the saved fix without taking anything from the page", async () => {
+    const { handlers, fixed } = setup()
+    const review = handlers["fix:review"] as (...values: unknown[]) => Promise<unknown>
+    expect(await review("--anything", { patch: "x" })).toEqual({
+      review: null,
+      message: "There is no saved fix. Look for one first.",
+    })
+    expect(fixed).toEqual(["review(0)"])
+  })
+
+  it("applies only the fix whose id the page gives back, and nothing else it says", async () => {
+    const { handlers, fixed } = setup()
+    const id = "a".repeat(64)
+    const apply = handlers["fix:apply"] as (...values: unknown[]) => Promise<unknown>
+    expect(await apply(id, { path: "/etc/passwd" }, "--yes")).toEqual(DONE("apply"))
+    expect(fixed).toEqual([`apply(${id})`])
+  })
+
+  it.each([
+    undefined,
+    null,
+    "",
+    "latest",
+    "A".repeat(64),
+    "a".repeat(63),
+    "a".repeat(65),
+    `${"a".repeat(63)}g`,
+    42,
+    { id: "a".repeat(64) },
+    ["a".repeat(64)],
+  ])("refuses an id that is not one (%j)", async (id) => {
+    const { handlers, fixed } = setup()
+    expect(() => handlers["fix:apply"](id)).toThrow("not the id of a fix")
+    expect(fixed).toEqual([])
+  })
+
+  it("forgets the saved fix when the project changes, and not otherwise", async () => {
+    const { handlers, fixed } = setup({ dialog: "/home/ana/shop" })
+    await handlers["project:choose"]()
+    expect(fixed).toEqual(["forget"])
+    const refused = setup({ dialog: "/", refuse: "That folder cannot be the project." })
+    await refused.handlers["project:choose"]()
+    expect(refused.fixed).toEqual([])
+    const closed = setup({ dialog: null })
+    await closed.handlers["project:choose"]()
+    expect(closed.fixed).toEqual([])
+    const reset = setup()
+    await reset.handlers["project:reset"]()
+    expect(reset.fixed).toEqual(["forget"])
   })
 
   it("is a section the page may show", async () => {

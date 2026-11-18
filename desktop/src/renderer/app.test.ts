@@ -7,6 +7,7 @@ import type {
   DockerStatus,
   FixOutcome,
   FixResult,
+  FixReview,
   KeyCheck,
   KeySave,
   KeyStatus,
@@ -21,6 +22,7 @@ import {
   CHECKING_NOTICE,
   ACTION_FAILED,
   controlLabel,
+  diffLines,
   ICONS,
   dockerCard,
   EMPTY_NOTICE,
@@ -37,6 +39,8 @@ import {
   projectCard,
   projectNotice,
   removeNotice,
+  reviewCard,
+  reviewSummary,
   SAVE_FAILED_NOTICE,
   saveNotice,
   SECTIONS,
@@ -529,11 +533,97 @@ describe("the card of the fix", () => {
   })
 })
 
+describe("the fix on screen while it is applied", () => {
+  it("says it tests the fix again first, and that the files are written only if the tests pass", () => {
+    const card = fixCard(DOCKER_OK, RUNNING, CHOSEN, "apply")
+    expect(card).toMatchObject({ tone: "idle", title: "Applying the fix…" })
+    expect(card.lines.join(" ")).toContain("writes your files only if the tests pass")
+    expect(card.lines).not.toContain("Your files are not changed.")
+  })
+
+  it("says in plain words how an application ended", () => {
+    const said = (outcome: FixOutcome) => fixNotice({ kind: "apply", outcome, message: "m" })?.title
+    expect(said("applied")).toBe("Fix applied")
+    expect(said("blocked")).toBe("Not applied")
+    expect(said("declined")).toBeUndefined()
+  })
+})
+
+const REVIEW: FixReview = {
+  id: "a".repeat(64),
+  description: "sumar must add its two numbers",
+  edits: [{ path: "app.py", old: "    return a - b", new: "    return a + b" }],
+}
+
+describe("the fix that is about to be applied", () => {
+  it("shows what each change takes out, then what it puts in", () => {
+    expect(diffLines(REVIEW.edits[0] as FixReview["edits"][number])).toEqual([
+      { kind: "removed", text: "    return a - b" },
+      { kind: "added", text: "    return a + b" },
+    ])
+  })
+
+  it("shows every line of a text of many lines, without the last line break", () => {
+    const lines = diffLines({ path: "a.py", old: "one\ntwo\n", new: "x\ny\nz\n" })
+    expect(lines.map((line) => `${line.kind}:${line.text}`)).toEqual([
+      "removed:one",
+      "removed:two",
+      "added:x",
+      "added:y",
+      "added:z",
+    ])
+  })
+
+  it("shows nothing for a side that is empty, as in a new file or a deletion", () => {
+    expect(diffLines({ path: "new.py", old: "", new: "x = 1\n" })).toEqual([
+      { kind: "added", text: "x = 1" },
+    ])
+    expect(diffLines({ path: "old.py", old: "x = 1\n", new: "" })).toEqual([
+      { kind: "removed", text: "x = 1" },
+    ])
+  })
+
+  it("keeps blank lines and indentation, which can matter", () => {
+    const lines = diffLines({ path: "a.py", old: "a\n\n    b", new: "" })
+    expect(lines.map((line) => line.text)).toEqual(["a", "", "    b"])
+  })
+
+  it("counts files, and the lines taken out and put in", () => {
+    expect(reviewSummary(REVIEW)).toBe("1 file, 1 line removed and 1 added")
+    const more: FixReview = {
+      ...REVIEW,
+      edits: [
+        { path: "a.py", old: "1\n2\n", new: "x\n" },
+        { path: "b.py", old: "", new: "y\nz\n" },
+        { path: "a.py", old: "q", new: "r" },
+      ],
+    }
+    expect(reviewSummary(more)).toBe("2 files, 3 lines removed and 4 added")
+  })
+
+  it("warns, because it will change files, and says nothing is changed yet", () => {
+    const card = reviewCard(REVIEW)
+    expect(card.tone).toBe("warn")
+    expect(card.title).toBe("Review the fix before it is applied")
+    expect(card.lines).toEqual([
+      "sumar must add its two numbers",
+      "1 file, 1 line removed and 1 added",
+      "Your files are not changed yet.",
+    ])
+  })
+
+  it("leaves out a description that is not there", () => {
+    expect(reviewCard({ ...REVIEW, description: "" }).lines).toHaveLength(2)
+  })
+})
+
 describe("what is said after a run", () => {
   const all: FixOutcome[] = [
     "passed",
     "failed",
     "fixed",
+    "applied",
+    "blocked",
     "nothing",
     "unfixed",
     "cancelled",
@@ -558,14 +648,20 @@ describe("what is said after a run", () => {
   it("is good only when the tests pass or a fix was found, or there was nothing to fix", () => {
     const tone = (outcome: FixOutcome) =>
       fixNotice({ kind: "fix", outcome, message: "m" })?.tone ?? "none"
-    expect(["passed", "fixed", "nothing"].map((o) => tone(o as FixOutcome))).toEqual([
+    const tones = (outcomes: FixOutcome[]) => outcomes.map(tone)
+    expect(tones(["passed", "fixed", "applied", "nothing"])).toEqual([
+      "good",
       "good",
       "good",
       "good",
     ])
-    expect(["failed", "unfixed", "cancelled", "refused"].map((o) => tone(o as FixOutcome))).toEqual(
-      ["warn", "warn", "warn", "warn"],
-    )
+    expect(tones(["failed", "unfixed", "blocked", "cancelled", "refused"])).toEqual([
+      "warn",
+      "warn",
+      "warn",
+      "warn",
+      "warn",
+    ])
     expect(tone("error")).toBe("bad")
   })
 
@@ -633,6 +729,20 @@ describe("the page's own code", () => {
   it("asks nothing of the user for a run, because the main process asks", async () => {
     const source = await readFile(join(__dirname, "app.ts"), "utf8")
     expect(source).not.toMatch(/confirm\(|window\.confirm|prompt\(/)
+  })
+
+  it("gives back only the id of the fix to apply it, never the fix", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source).toMatch(/api\.fixApply\(review\.id\)/)
+    expect(source.match(/api\.fixApply\(/g)).toHaveLength(1)
+  })
+
+  it("shows the changes as text, with a sign that does not depend on color", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source).toMatch(/"removed" \? "-" : "\+"/)
+    const css = await readFile(join(__dirname, "styles.css"), "utf8")
+    expect(css).toMatch(/\.diff-line\.removed/)
+    expect(css).toMatch(/\.diff-line\.added/)
   })
 
   it("has a title bar the window can be dragged by, with its buttons apart from the drag", async () => {

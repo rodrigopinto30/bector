@@ -71,16 +71,20 @@ export interface StackResult {
 }
 
 /** What the app can ask the services to do with the project. */
-export type FixKind = "test" | "fix"
+export type FixKind = "test" | "fix" | "apply"
 
 /**
  * How a run ended. "declined" and "refused" mean nothing was run: the first because the user
- * said no in the dialog, the second because the services were not ready.
+ * said no in the dialog, the second because the services were not ready. "applied" is the only
+ * outcome that wrote to the project, and "blocked" means the fix was tested again and did not
+ * pass, so nothing was written.
  */
 export type FixOutcome =
   | "passed"
   | "failed"
   | "fixed"
+  | "applied"
+  | "blocked"
   | "nothing"
   | "unfixed"
   | "cancelled"
@@ -98,6 +102,30 @@ export interface FixResult {
 export interface FixStatus {
   /** What is running now, or null. */
   running: FixKind | null
+  /** Whether a fix was found and is saved, waiting to be reviewed. */
+  saved: boolean
+}
+
+/** One change of the saved fix: the text to replace in a file of the project, and what replaces it. */
+export interface FixEdit {
+  path: string
+  old: string
+  new: string
+}
+
+/** The saved fix, as it will be applied. */
+export interface FixReview {
+  /** Identifies exactly this fix, so that what is applied is what was reviewed. */
+  id: string
+  description: string
+  edits: FixEdit[]
+}
+
+export interface FixReviewResult {
+  /** The saved fix, or null when there is none to review. */
+  review: FixReview | null
+  /** Why there is none; empty otherwise. */
+  message: string
 }
 
 /** The sections of the window: the panel, the project, the fix, and the settings of the app. */
@@ -132,7 +160,15 @@ export interface HealerApi {
   projectChoose(): Promise<ProjectChoice>
   /** Goes back to the default folder. */
   projectReset(): Promise<ProjectInfo>
+  /** What runs now, and whether a fix is saved. */
   fixStatus(): Promise<FixStatus>
+  /** The saved fix, to be shown before it is applied. Nothing is changed. */
+  fixReview(): Promise<FixReviewResult>
+  /**
+   * Applies the fix with that id to the project. The app asks first, in its own dialog, and
+   * applies only the fix that was reviewed: if the saved fix is another one, nothing happens.
+   */
+  fixApply(id: string): Promise<FixResult>
   /** Runs the tests of the project in the sandbox. Nothing is changed. */
   fixTest(): Promise<FixResult>
   /**

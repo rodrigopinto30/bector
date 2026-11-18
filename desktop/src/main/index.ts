@@ -79,6 +79,7 @@ async function start(): Promise<void> {
     root,
     run,
     stack: () => stack.status(),
+    project: async () => (await workspace.plan()).expected,
     confirm: (question) => main?.confirm(question) ?? Promise.resolve(false),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     onLine: (line) => main?.send("fix:line", line),
