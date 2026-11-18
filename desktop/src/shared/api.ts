@@ -70,8 +70,38 @@ export interface StackResult {
   message: string
 }
 
-/** The two sections of the window: the panel, and the settings of the app. */
-export type Section = "panel" | "project" | "settings"
+/** What the app can ask the services to do with the project. */
+export type FixKind = "test" | "fix"
+
+/**
+ * How a run ended. "declined" and "refused" mean nothing was run: the first because the user
+ * said no in the dialog, the second because the services were not ready.
+ */
+export type FixOutcome =
+  | "passed"
+  | "failed"
+  | "fixed"
+  | "nothing"
+  | "unfixed"
+  | "cancelled"
+  | "declined"
+  | "refused"
+  | "error"
+
+export interface FixResult {
+  kind: FixKind
+  outcome: FixOutcome
+  /** What to tell the user, in a sentence or two. */
+  message: string
+}
+
+export interface FixStatus {
+  /** What is running now, or null. */
+  running: FixKind | null
+}
+
+/** The sections of the window: the panel, the project, the fix, and the settings of the app. */
+export type Section = "panel" | "project" | "fix" | "settings"
 
 /** A rectangle of the window, in pixels from its top left corner. */
 export interface Bounds {
@@ -102,6 +132,16 @@ export interface HealerApi {
   projectChoose(): Promise<ProjectChoice>
   /** Goes back to the default folder. */
   projectReset(): Promise<ProjectInfo>
+  fixStatus(): Promise<FixStatus>
+  /** Runs the tests of the project in the sandbox. Nothing is changed. */
+  fixTest(): Promise<FixResult>
+  /**
+   * Looks for a fix and saves it, without applying it. The app asks first, in its own dialog,
+   * because Claude may be asked for patches, which spends tokens.
+   */
+  fixFind(): Promise<FixResult>
+  /** Stops what is running. */
+  fixCancel(): Promise<void>
   /** Shows a section. The panel is shown by the app on top of the page, in the content area. */
   showSection(section: Section): Promise<void>
   /** Where the content area is, so the app can put the panel exactly there. */
@@ -111,6 +151,8 @@ export interface HealerApi {
   /** Lines of output while the services start. Returns a function that stops listening. */
   onLine(listener: (line: string) => void): () => void
   onWindowState(listener: (state: WindowState) => void): () => void
+  /** Lines of output while the tests run or a fix is looked for. */
+  onFixLine(listener: (line: string) => void): () => void
   /** The panel could not be loaded: the services are stopped or still starting. */
   onPanelFailed(listener: () => void): () => void
   /** A keyboard shortcut of the app, such as Ctrl+, for the settings. */

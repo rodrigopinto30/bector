@@ -1,6 +1,8 @@
 import type {
   Bounds,
   DockerStatus,
+  FixResult,
+  FixStatus,
   KeySave,
   KeyStatus,
   ProjectChoice,
@@ -10,6 +12,7 @@ import type {
   StackStatus,
   WindowAction,
 } from "../shared/api"
+import type { Fixer } from "./fix"
 import { checkKey, isUsable, normalizeKey, type Fetch } from "./key"
 import { isSection, isWindowAction, parseBounds } from "./layout"
 import { isAllowedExternal } from "./policy"
@@ -25,6 +28,7 @@ export interface HandlerDeps {
   vault: Pick<KeyVault, "status" | "save" | "remove">
   stack: Pick<Stack, "status" | "start" | "stop">
   workspace: Pick<Workspace, "info" | "choose" | "reset">
+  fix: Pick<Fixer, "status" | "test" | "find" | "cancel">
   fetchFn: Fetch
   /** The window: which section it shows, where its content is, and its own buttons. */
   window: {
@@ -94,6 +98,12 @@ export function createHandlers(deps: HandlerDeps) {
       return deps.workspace.choose(folder)
     },
     "project:reset": (): Promise<ProjectInfo> => deps.workspace.reset(),
+    "fix:status": async (): Promise<FixStatus> => deps.fix.status(),
+    "fix:test": (): Promise<FixResult> => deps.fix.test(),
+    // Asking before Claude is used is the job of the main process, not of the page: whatever
+    // the page asks, it is the dialog of the app that decides.
+    "fix:find": (): Promise<FixResult> => deps.fix.find(),
+    "fix:cancel": (): Promise<void> => deps.fix.cancel(),
     "section:show": async (section: unknown): Promise<void> => {
       if (!isSection(section)) {
         throw new Error("that section does not exist")

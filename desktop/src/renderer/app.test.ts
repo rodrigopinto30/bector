@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest"
 
 import type {
   DockerStatus,
+  FixOutcome,
+  FixResult,
   KeyCheck,
   KeySave,
   KeyStatus,
@@ -13,6 +15,7 @@ import type {
   StackStatus,
 } from "../shared/api"
 import {
+  canFix,
   canStart,
   checkMessage,
   CHECKING_NOTICE,
@@ -21,6 +24,9 @@ import {
   ICONS,
   dockerCard,
   EMPTY_NOTICE,
+  FIX_FAILED,
+  fixCard,
+  fixNotice,
   folderName,
   KEY_CHECK_FAILED,
   Message,
@@ -458,9 +464,120 @@ describe("what a restart of the services is waiting for", () => {
   })
 })
 
+const DOCKER_OK: DockerStatus = { ok: true, version: "27.3.1" }
+
+describe("whether the tests can be run", () => {
+  it("needs Docker, the services on the chosen folder, and a usable folder", () => {
+    expect(canFix(DOCKER_OK, RUNNING, CHOSEN)).toBe(true)
+    expect(canFix(null, RUNNING, CHOSEN)).toBe(false)
+    expect(canFix({ ...DOCKER_PROBLEM }, RUNNING, CHOSEN)).toBe(false)
+    expect(canFix(DOCKER_OK, null, CHOSEN)).toBe(false)
+    expect(canFix(DOCKER_OK, { ...RUNNING, running: false }, CHOSEN)).toBe(false)
+    expect(canFix(DOCKER_OK, { ...RUNNING, workspaceMatches: false }, CHOSEN)).toBe(false)
+    expect(canFix(DOCKER_OK, RUNNING, null)).toBe(false)
+    expect(canFix(DOCKER_OK, RUNNING, { ...CHOSEN, problem: "It does not exist." })).toBe(false)
+  })
+
+  it("does not wait for a folder that Docker cannot tell", () => {
+    expect(canFix(DOCKER_OK, { ...RUNNING, workspaceMatches: null }, CHOSEN)).toBe(true)
+  })
+})
+
+const DOCKER_PROBLEM: DockerStatus = {
+  ok: false,
+  problem: "daemon",
+  message: "Docker is installed, but it is not running.",
+  hint: "Start it.",
+}
+
+describe("the card of the fix", () => {
+  it("is ready on the chosen project, and says nothing is changed", () => {
+    const card = fixCard(DOCKER_OK, RUNNING, CHOSEN, null)
+    expect(card.tone).toBe("good")
+    expect(card.title).toBe("Ready: shop")
+    expect(card.lines).toContain(SHOP)
+    expect(card.lines.join(" ")).toContain("does not change your files either")
+  })
+
+  it("says what is running, and that the files are not changed", () => {
+    expect(fixCard(DOCKER_OK, RUNNING, CHOSEN, "test")).toMatchObject({
+      tone: "idle",
+      title: "Running the tests…",
+    })
+    const looking = fixCard(DOCKER_OK, RUNNING, CHOSEN, "fix")
+    expect(looking.title).toBe("Looking for a fix…")
+    expect(looking.lines).toContain("Your files are not changed.")
+  })
+
+  it("is waiting while the page is still asking", () => {
+    expect(fixCard(null, null, null, null)).toMatchObject({ tone: "idle" })
+    expect(fixCard(DOCKER_OK, RUNNING, null, null)).toMatchObject({ tone: "idle" })
+  })
+
+  it("says what is wrong, and where to go", () => {
+    expect(fixCard(DOCKER_PROBLEM, null, CHOSEN, null).title).toBe("Docker is not working")
+    expect(fixCard(DOCKER_OK, null, CHOSEN, null).title).toBe("The services are stopped")
+    expect(
+      fixCard(DOCKER_OK, { ...RUNNING, running: false }, CHOSEN, null).lines.join(" "),
+    ).toMatch(/Settings/)
+    const other = fixCard(DOCKER_OK, { ...RUNNING, workspaceMatches: false }, CHOSEN, null)
+    expect(other).toMatchObject({ tone: "warn", title: "The services use another folder" })
+    expect(other.lines.join(" ")).toContain("shop")
+    const broken = fixCard(DOCKER_OK, RUNNING, { ...CHOSEN, problem: "It does not exist." }, null)
+    expect(broken).toMatchObject({ tone: "bad" })
+    expect(broken.lines).toContain("It does not exist.")
+  })
+})
+
+describe("what is said after a run", () => {
+  const all: FixOutcome[] = [
+    "passed",
+    "failed",
+    "fixed",
+    "nothing",
+    "unfixed",
+    "cancelled",
+    "declined",
+    "refused",
+    "error",
+  ]
+
+  it("says something about every outcome but a refusal in the dialog", () => {
+    for (const outcome of all) {
+      const result: FixResult = { kind: "fix", outcome, message: "Because." }
+      const notice = fixNotice(result)
+      if (outcome === "declined") {
+        expect(notice).toBeNull()
+      } else {
+        expect(notice?.text).toBe("Because.")
+        expect(notice?.title.length).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it("is good only when the tests pass or a fix was found, or there was nothing to fix", () => {
+    const tone = (outcome: FixOutcome) =>
+      fixNotice({ kind: "fix", outcome, message: "m" })?.tone ?? "none"
+    expect(["passed", "fixed", "nothing"].map((o) => tone(o as FixOutcome))).toEqual([
+      "good",
+      "good",
+      "good",
+    ])
+    expect(["failed", "unfixed", "cancelled", "refused"].map((o) => tone(o as FixOutcome))).toEqual(
+      ["warn", "warn", "warn", "warn"],
+    )
+    expect(tone("error")).toBe("bad")
+  })
+
+  it("has a plain failure for when the main process breaks in the middle", () => {
+    expect(FIX_FAILED.outcome).toBe("error")
+    expect(FIX_FAILED.message).toBe("The app could not do that. Try again.")
+  })
+})
+
 describe("the window", () => {
   it("has its sections in the menu, the panel first and the settings", () => {
-    expect(SECTIONS.map((section) => section.id)).toEqual(["panel", "project", "settings"])
+    expect(SECTIONS.map((section) => section.id)).toEqual(["panel", "project", "fix", "settings"])
     expect(SECTIONS.every((section) => section.label.length > 0)).toBe(true)
   })
 
@@ -511,6 +628,11 @@ describe("the page's own code", () => {
     expect(source).toMatch(/"banner-close"/)
     expect(source).toMatch(/aria-label",\s*"Dismiss this message"/)
     expect(source).toMatch(/keyMessage\.checking\s*\?\s*undefined\s*:\s*closeMessage/)
+  })
+
+  it("asks nothing of the user for a run, because the main process asks", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source).not.toMatch(/confirm\(|window\.confirm|prompt\(/)
   })
 
   it("has a title bar the window can be dragged by, with its buttons apart from the drag", async () => {

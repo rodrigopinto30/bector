@@ -16,6 +16,7 @@ import {
 } from "electron"
 
 import { checkDocker } from "./docker"
+import { Fixer } from "./fix"
 import { createHandlers, type Channel } from "./handlers"
 import type { Fetch } from "./key"
 import { isShellPage } from "./policy"
@@ -74,11 +75,21 @@ async function start(): Promise<void> {
     onLine: (line) => main?.send("stack:line", line),
   })
 
+  const fix = new Fixer({
+    root,
+    run,
+    stack: () => stack.status(),
+    confirm: (question) => main?.confirm(question) ?? Promise.resolve(false),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    onLine: (line) => main?.send("fix:line", line),
+  })
+
   const handlers = createHandlers({
     docker: () => checkDocker(run),
     vault,
     stack,
     workspace,
+    fix,
     fetchFn,
     window: {
       show: (section) => main?.show(section) ?? Promise.resolve(),
