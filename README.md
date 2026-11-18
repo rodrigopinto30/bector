@@ -767,7 +767,7 @@ The panel's tools run in a Node container (`node:26.13.0-trixie-slim`, the same 
 ./panel.sh npm ...  # any npm command, such as: ./panel.sh npm install --save-exact NAME
 ```
 
-- **The packages come from `panel/package-lock.json`,** which pins each one with its hash. `npm ci` installs exactly that, with install scripts off, both here and in the image. The audit fails on any known vulnerability.
+- **The packages come from `panel/package-lock.json`,** which pins each one with its hash. `npm ci` installs exactly that, with install scripts off, both here and in the image. The audit fails on any known vulnerability in what ships, and on any in the development tools that is not listed, with its reason, in `panel/audit-exceptions.txt`: see the desktop app's code below, which works the same way.
 - **The CSS of shadcn is copied into `panel/src/styles/shadcn.css`,** so its command line, which brought vulnerable packages, is not a dependency. To add a component, run `./panel.sh npm exec --yes shadcn@4.23.0 add NAME`.
 - **The types of `panel/src/lib/types.ts` mirror `PanelSnapshot`** (`src/healer/domain/panel.py`). The sample `panel/src/lib/fixtures/snapshot.json` is checked by a Python test against the model, so a field changed on one side and not the other makes a test fail.
 - After changing `panel/`, run `./stop.sh && ./start.sh` so http://localhost:8765 serves the new build.
@@ -787,6 +787,7 @@ The desktop app's tools run in the same Node container as the panel's, as your o
 
 - **The packages come from `desktop/package-lock.json`,** with install scripts off. That is why Electron's program is not downloaded with them: `./desktop.sh electron` does it, once, after asking, and checks it against the checksums Electron publishes. It is kept in `desktop/.electron`, because `npm ci` deletes `node_modules` whenever the lock changes, even for a new version number. The checks and CI need only Electron's types.
 - **The page of the window is built into one file,** `desktop/dist/renderer/index.html`, with its script and styles inline and a Content-Security-Policy that allows exactly those two by their hash. A test checks that the page uses no markup built from text, no inline handlers and no imports.
+- **The audit has exceptions, with a reason, for the development tools only.** `npm audit` has no list of exceptions, so `./desktop.sh audit` and `./panel.sh audit` run `scripts/npm-audit.mjs`, which reads its report. What ships (`npm audit --omit=dev`) must have no advisory at all, and nothing can be excepted there. Everything else, the development tools included, may have only the advisories listed, with their reason, in `desktop/audit-exceptions.txt` or `panel/audit-exceptions.txt`, one `GHSA-...` per line. An exception that is no longer reported is pointed out, so it can be removed when a fixed version is locked. Today there is one, `picomatch` (`GHSA-fc5q-39xc-vjpf`), which has no fixed version yet and is reached only through the test runner and the linter. The filter's own tests run first on every audit.
 - **The version of `desktop/package.json` and its lock must equal the project's,** like the panel's. A Python test checks all of them.
 
 ## The Chroma database

@@ -8,6 +8,10 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 - The desktop app has a **Project** section to choose the folder with the code to fix, with your system's folder dialog. The app refuses folders that cannot be a project (the root of the disk, your whole home folder, the system's folders, folders you cannot write to, paths with a colon), says what is worth knowing about the one you pick, and gives it to the services as `WORKSPACE_PATH` in the environment of the process that starts them, so `.env` is never written. If the services have another folder, the app says so and offers to restart them.
 
+### Changed
+
+- `./panel.sh audit` and `./desktop.sh audit` accept documented exceptions, for the development tools only. What ships must have no advisory, and nothing can be excepted there. Any other advisory must be listed, with its reason, in `panel/audit-exceptions.txt` or `desktop/audit-exceptions.txt`, and an exception that is no longer reported is pointed out. Today there is one: `picomatch` (`GHSA-fc5q-39xc-vjpf`), with no fixed version yet, which was failing the audit of both apps.
+
 ### Fixed
 
 - `./desktop.sh` no longer deletes the Electron program when the packages are reinstalled. It is kept in `desktop/.electron`, outside `node_modules`, because `npm ci` deletes `node_modules` whenever the lock changes, even for a new version number. If the app asks for another version of Electron than the one downloaded, `./desktop.sh run` says so.
