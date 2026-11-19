@@ -16,6 +16,7 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ### Fixed
 
+- The test sandbox no longer goes on with a run whose client left. It answers one request at a time and did not notice that the cli had gone, so after Ctrl+C in a terminal, or the Stop of the desktop app, its tests kept running until they ended or reached their time limit (300 seconds by default), the next run waited behind them, and the copy stayed in memory until `./stop.sh`. Now the sandbox watches the connection while a command runs: when the client closes it, the command and its children are killed, the copy is deleted and the next request is served. A copy that nobody used for more than two hours, such as one left by a cli that died before it sent its request, is deleted after the next request. Rebuild the images to get it (`./stop.sh && ./start.sh`).
 - `./desktop.sh` no longer deletes the Electron program when the packages are reinstalled. It is kept in `desktop/.electron`, outside `node_modules`, because `npm ci` deletes `node_modules` whenever the lock changes, even for a new version number. If the app asks for another version of Electron than the one downloaded, `./desktop.sh run` says so.
 
 ## [1.2.0] - 2026-11-17
