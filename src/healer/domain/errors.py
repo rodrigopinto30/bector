@@ -30,6 +30,10 @@ class ExecutionError(HealerError):
     """A command could not be started."""
 
 
+class RunAbandonedError(ExecutionError):
+    """A command was stopped because whoever asked for it left before it ended."""
+
+
 class SandboxError(HealerError):
     """The isolated copy of the workspace could not be created."""
 
