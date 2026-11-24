@@ -4,6 +4,10 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- The **Fix** section of the desktop app has **Options**: the test command (for example `pytest tests/unit -x`, which also tests a fix again when it is applied), how many patches to try, and which of the errors that the tests show to fix. The system still allows only `pytest` and `python -m pytest` with arguments inside the project, and the app says so when it refuses a command. The choices are checked by the page and again by the app's main process, and a command reaches the system as one argument that no shell reads. The command and the attempts are kept for the next time.
+
 ## [1.3.0] - 2026-11-24
 
 The desktop app does the whole round without the terminal: choose the project, run its tests, look for a fix, review it and apply it. The test sandbox also stops a run when its client leaves.

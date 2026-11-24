@@ -1,0 +1,37 @@
+# 0032. Choosing the test command, the attempts and the error from the app
+
+## Context
+
+The Fix section of the desktop app (ADR 0028 and 0030) ran the system with its own choices: its default test command, its default number of attempts, and the first of the errors that the tests show. `healer test`, `healer run` and `healer apply` already take the three: the command as an argument, `--attempts` and `--error`. Someone with a large project wants to run only part of the tests, and someone whose first error is not the one to fix wants the second.
+
+ADR 0028 and 0030 made a point of the page giving nothing but an id: it could not choose a command, a path or an option. This changes the first and the last of those on purpose, with limits, so the decision has to say how.
+
+## Decision
+
+- **An Options card in the Fix section,** closed until opened, with three fields. **Test command** is what runs the tests. **Attempts** is the most patches the system tries, from 1 to 10. **Error to fix** lists the errors that the last run of the tests showed, and chooses one. Each field says what it is for, including which commands the system allows. While something runs they cannot be changed.
+- **The page gives the choices; the main process checks them again, and starts the program.** Both apply the same rules, written once in `shared/options.ts` for the main process and copied into the page, which is built into one file that imports nothing. A test runs a table of choices through both and requires the same answer and the same message, so the two cannot drift apart without a test failing.
+  - The command is one line of at most 200 characters, with no control characters, that does not start with `-`, so it cannot be taken for an option of the system. Spaces around it are cut.
+  - The attempts are empty, or a whole number from 1 to 10. The error is a whole number from 1 to 100.
+  - Anything else the page sends is dropped, and anything that does not fit is refused, with no run.
+- **The system decides which commands are allowed.** The app does not repeat the allowlist: `pytest` and `python -m pytest`, with arguments that may not point outside the project, are the system's own rule (`CommandPolicy`), and it says why when it refuses one. The app shows that reason as it is. Checked with the real system: `ls` is refused with `Command not allowed: 'ls'. Allowed: pytest, python -m pytest`, `pytest ../x` with `Argument '../x' points outside the sandbox`, and `pytest; echo hacked > /tmp/hacked` as a command that is not allowed, and the file was not created.
+- **A command is one argument.** It is given to the system as a single element of the list of arguments, never joined into a line and never read by a shell, so `;`, `&&` or `$(...)` in it are only characters.
+- **The command is used by the three actions.** It runs the tests, it is what the search tests each patch with, and it is what tests the fix again when it is applied, because applying writes only if the tests pass and they should be the tests the user cares about. It is the command in the page when the user presses the button, so a fix found with one command can be applied with another; the user sees it there.
+- **The attempts matter to the question before spending tokens.** When they are set, the question says `up to 2 attempts and the token limit in its settings`; otherwise it says `the limits in its settings`, as before. They are not given to the tests or to the application.
+- **The errors come from what the system prints.** The system numbers the errors it diagnoses as `[1] AssertionError: ...`, `[2] ...`. The main process reads those lines from the output of a run of the tests, and only the numbers that follow one another from 1 count, so no other line can pass for one. They go to the page with the result, and are forgotten when the project changes, when the tests pass, or when the page is opened again. If the format were ever to change, the list would come out empty and the choice would stay on the first error, which is what the system does by default.
+- **A fix counts only when every test passes with it.** This is how the system's repair loop works, and the help of the field says so. Checked with two independent failures: a patch for one of them is rejected because the other still fails, so choosing the second error is for errors that have one cause, such as two tests of the same bug.
+- **The command and the attempts are kept in the browser's storage of the app,** with the failures that storage can have handled, because they are the same from one session to the next. The error is not: it belongs to a run.
+- **The bridge keeps its twenty functions and five events.** Three of them take the options.
+
+## Consequences
+
+- Someone can run part of the tests, limit the cost of a search, and aim it at the error that matters, without a terminal.
+- The page can now choose a command, but only a line that the system will still check, and only one that starts as a command. Everything else the previous decisions kept from the page is unchanged: the question before spending tokens, and before writing to the project, is the main process's; and the id of the fix that is applied is still the only thing the page names.
+- The rules exist twice, in the main process and in the page. The test that compares them is what keeps them honest.
+- Not done: running the search for a list of errors in turn, the token limit, the time limit of a run, and choosing the test command from a list of what the project offers.
+- Measured with the real system and the real app (Electron 45.3.2, Ubuntu with GNOME), in an isolated Compose project with its own containers, volumes and ports, and a fake Anthropic API on this computer, so no token was spent and no real key was used:
+  - With two tests that fail, the real `healer test` printed `[1] ...` and `[2] ...`, which the app listed. With a command that runs only one of them, only its error was listed.
+  - The search for the second error, with 2 attempts, worked on `assert -2 == 10`, said `limits     2 attempts`, and found the fix. With a fake API that never helps, 2 attempts made 2 requests and the default made 3.
+  - Applying with `pytest test_app.py::test_dos` tested the fix again with that command, and applied it.
+  - 23 checks of the real window: the card closed, the fields with their examples and their help, the error list disabled before any run and enabled after one, the question naming the attempts, a command or attempts that cannot be used told next to the options, which open by themselves, with nothing asked of the system and the message going when the field is edited, the system's own reason for a command it does not allow, a command that runs one test listing one error, the command and the attempts back after reloading the window and the errors not, the fix tested again with the chosen command, the errors forgotten when the folder changes, and the fields locked while a run goes.
+  - 424 tests pass, and ten changes that break a rule on purpose were each caught by a test: not checking what the page chose, never giving the command, never giving the error, always giving the attempts, counting an error line out of order, letting a command start as an option, letting a control character through, applying without the command, accepting 11 attempts, and hiding the attempts from the question.
+- Not measured: a real answer from Claude, and the native dialogs, as in the earlier steps.
