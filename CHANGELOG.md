@@ -4,6 +4,10 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-24
+
+The desktop app does the whole round without the terminal: choose the project, run its tests, look for a fix, review it and apply it. The test sandbox also stops a run when its client leaves.
+
 ### Added
 
 - The desktop app has a **Project** section to choose the folder with the code to fix, with your system's folder dialog. The app refuses folders that cannot be a project (the root of the disk, your whole home folder, the system's folders, folders you cannot write to, paths with a colon), says what is worth knowing about the one you pick, and gives it to the services as `WORKSPACE_PATH` in the environment of the process that starts them, so `.env` is never written. If the services have another folder, the app says so and offers to restart them.
@@ -18,6 +22,23 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 - The test sandbox no longer goes on with a run whose client left. It answers one request at a time and did not notice that the cli had gone, so after Ctrl+C in a terminal, or the Stop of the desktop app, its tests kept running until they ended or reached their time limit (300 seconds by default), the next run waited behind them, and the copy stayed in memory until `./stop.sh`. Now the sandbox watches the connection while a command runs: when the client closes it, the command and its children are killed, the copy is deleted and the next request is served. A copy that nobody used for more than two hours, such as one left by a cli that died before it sent its request, is deleted after the next request. Rebuild the images to get it (`./stop.sh && ./start.sh`).
 - `./desktop.sh` no longer deletes the Electron program when the packages are reinstalled. It is kept in `desktop/.electron`, outside `node_modules`, because `npm ci` deletes `node_modules` whenever the lock changes, even for a new version number. If the app asks for another version of Electron than the one downloaded, `./desktop.sh run` says so.
+
+### Upgrading to 1.3.0
+
+```bash
+git pull
+./stop.sh && ./start.sh
+```
+
+Nothing has to be converted by hand. `./start.sh` rebuilds the images, which this version needs: the test sandbox runs the code of its image, and the fix for a run whose client left is in that code. Until it is rebuilt, the **Stop** of the desktop app still works, because it restarts the sandbox as a safety net.
+
+If you use the desktop app, Electron's program is now kept in `desktop/.electron`, outside `node_modules`, so that reinstalling the packages cannot delete it. If `./desktop.sh run` says that the program is not downloaded, run `./desktop.sh electron` once: it asks before it downloads anything, and it is about 270 MB if it has to.
+
+The services get the project folder chosen in the app as `WORKSPACE_PATH` in the environment of the command that starts them, as they get the key. `.env` is never written. Starting the services from a terminal without that variable gives them the folder of your `.env` again, as before.
+
+### Compatibility within a team
+
+Nodes on 1.2.0 and 1.3.0 send and read the same messages. Nothing a team shares changes: this version touches the desktop app, the test sandbox of one computer and the scripts that audit the packages.
 
 ## [1.2.0] - 2026-11-17
 
@@ -168,7 +189,8 @@ docker compose --profile team up -d listener   # only if you run the team listen
 - Nodes from before #23 neither send nor receive results. Results travel on their own topic, `MQTT_TOPIC/results`, so those nodes never see one.
 - A team with nodes of different versions still works; upgrading every node brings the ranking to all of them.
 
-[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/rodrigopinto30/bector/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.3.0
 [1.2.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.2.0
 [1.1.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rodrigopinto30/bector/releases/tag/v1.0.0
