@@ -12,7 +12,7 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ### Changed
 
-- `./panel.sh audit` and `./desktop.sh audit` accept documented exceptions, for the development tools only. What ships must have no advisory, and nothing can be excepted there. Any other advisory must be listed, with its reason, in `panel/audit-exceptions.txt` or `desktop/audit-exceptions.txt`, and an exception that is no longer reported is pointed out. Today there is one: `picomatch` (`GHSA-fc5q-39xc-vjpf`), with no fixed version yet, which was failing the audit of both apps.
+- `./panel.sh audit` and `./desktop.sh audit` accept documented exceptions, for the development tools only. What ships must have no advisory, and nothing can be excepted there. Any other advisory must be listed, with its reason, in `panel/audit-exceptions.txt` or `desktop/audit-exceptions.txt`, and an exception that is no longer reported is pointed out. The one that was needed, for `picomatch` (`GHSA-fc5q-39xc-vjpf`), which had no fixed version and was failing the audit of both apps, was removed when `npm audit` stopped reporting it, so none is in use today.
 
 ### Fixed
 

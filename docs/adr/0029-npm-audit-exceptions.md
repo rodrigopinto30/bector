@@ -20,6 +20,7 @@ The Python audit already has a way out: `audit-exceptions.txt`, each entry with 
 - The audit of both apps is green again, and any other new advisory, in what ships or in the tools, still turns it red.
 - Someone who adds an exception must write why, in the file, where it is reviewed with the change.
 - `picomatch` has to be looked at again: when a version after 4.0.7 is published, upgrade the lock and remove the line.
+- Update, 2026-11-24: `npm audit` stopped reporting `picomatch`, with the latest published version still 4.0.7 and the lock unchanged, and the audit pointed out both exceptions as no longer reported, as designed. They were removed, and the lists have no entry today.
 - Measured with the real `npm audit` and the real lists, in the Node image the apps use:
   - Both audits passed with the exception, and said which advisory was excepted and why.
   - With an empty list, the audit of the desktop app failed with the advisory, its title and its link. With a list that named another advisory, it failed the same way and pointed out that the other one was no longer reported. With an exception without a reason, it failed and said so.
