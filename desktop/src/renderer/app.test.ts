@@ -3,6 +3,7 @@ import { join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
+import { checkOptions } from "../shared/options"
 import type {
   DockerStatus,
   FixOutcome,
@@ -18,11 +19,13 @@ import type {
 import {
   canFix,
   canStart,
+  checkChoice,
   checkMessage,
   CHECKING_NOTICE,
   ACTION_FAILED,
   controlLabel,
   diffLines,
+  errorChoices,
   ICONS,
   dockerCard,
   EMPTY_NOTICE,
@@ -32,6 +35,7 @@ import {
   folderName,
   KEY_CHECK_FAILED,
   Message,
+  OPTIONS_HELP,
   keyCard,
   PANEL_DOWN,
   PROJECT_CHECK_FAILED,
@@ -671,6 +675,75 @@ describe("what is said after a run", () => {
   })
 })
 
+describe("what the page checks before it asks", () => {
+  const CHOICES = [
+    { command: "", attempts: "", error: 1 },
+    { command: "pytest tests/unit -x", attempts: "3", error: 2 },
+    { command: "  python -m pytest  ", attempts: " 10 ", error: 100 },
+    { command: "--json", attempts: "", error: 1 },
+    { command: "-x", attempts: "", error: 1 },
+    { command: "pytest\nrm -rf /", attempts: "", error: 1 },
+    { command: "pytest\u0000", attempts: "", error: 1 },
+    { command: "pytest\tx", attempts: "", error: 1 },
+    { command: `p${"x".repeat(199)}`, attempts: "", error: 1 },
+    { command: `p${"x".repeat(200)}`, attempts: "", error: 1 },
+    { command: "pytest", attempts: "0", error: 1 },
+    { command: "pytest", attempts: "11", error: 1 },
+    { command: "pytest", attempts: "many", error: 1 },
+    { command: "pytest", attempts: "2.5", error: 1 },
+    { command: "pytest", attempts: "1e1", error: 1 },
+    { command: "pytest", attempts: "+3", error: 1 },
+    { command: "pytest", attempts: "-1", error: 1 },
+    { command: "pytest", attempts: "", error: 0 },
+    { command: "pytest", attempts: "", error: 101 },
+    { command: "pytest", attempts: "", error: 1.5 },
+    { command: "pytest", attempts: "", error: Number.NaN },
+  ]
+
+  it("are the rules of the main process, so that what the page lets through is not refused there", () => {
+    for (const choice of CHOICES) {
+      expect(checkChoice(choice), JSON.stringify(choice)).toEqual(checkOptions(choice))
+    }
+  })
+
+  it("say what is wrong in words, and give the options cleaned up when all is well", () => {
+    expect(checkChoice({ command: " pytest -x ", attempts: "4", error: 2 })).toEqual({
+      ok: true,
+      options: { command: "pytest -x", attempts: 4, error: 2 },
+    })
+    expect(checkChoice({ command: "-x", attempts: "", error: 1 })).toMatchObject({
+      ok: false,
+      problem: expect.stringContaining("one line") as string,
+    })
+  })
+})
+
+describe("choosing which error to fix", () => {
+  it("offers only the first error before any tests ran", () => {
+    expect(errorChoices([])).toEqual([{ value: 1, label: "The first error" }])
+  })
+
+  it("offers each error the tests showed, by its number and the start of what it says", () => {
+    expect(errorChoices(["AssertionError: assert -2 == 10", "KeyError: 'name'"])).toEqual([
+      { value: 1, label: "1 · AssertionError: assert -2 == 10" },
+      { value: 2, label: "2 · KeyError: 'name'" },
+    ])
+  })
+
+  it("cuts what an error says when it is long", () => {
+    const [choice] = errorChoices(["x".repeat(300)])
+    expect(choice?.label).toBe(`1 · ${"x".repeat(90)}…`)
+  })
+
+  it("explains each option, and says which commands the system allows", () => {
+    expect(OPTIONS_HELP.command).toContain("pytest and python -m pytest")
+    expect(OPTIONS_HELP.command).toContain("200")
+    expect(OPTIONS_HELP.attempts).toContain("from 1 to 10")
+    expect(OPTIONS_HELP.error).toContain("Run the tests to list them")
+    expect(OPTIONS_HELP.error).toContain("every test passes with it")
+  })
+})
+
 describe("the window", () => {
   it("has its sections in the menu, the panel first and the settings", () => {
     expect(SECTIONS.map((section) => section.id)).toEqual(["panel", "project", "fix", "settings"])
@@ -733,8 +806,21 @@ describe("the page's own code", () => {
 
   it("gives back only the id of the fix to apply it, never the fix", async () => {
     const source = await readFile(join(__dirname, "app.ts"), "utf8")
-    expect(source).toMatch(/api\.fixApply\(review\.id\)/)
+    expect(source).toMatch(/api\.fixApply\(review\.id, options\)/)
     expect(source.match(/api\.fixApply\(/g)).toHaveLength(1)
+  })
+
+  it("asks the system, with the choices the user made, only after checking them", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source).toMatch(/api\.fixTest\(options\)/)
+    expect(source).toMatch(/api\.fixFind\(options\)/)
+    expect(source).toMatch(/const options = takeOptions\(\)\s+if \(options === null\)/)
+  })
+
+  it("keeps what the user typed about the test command in the browser, if it can", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source).toMatch(/localStorage\.setItem\(\s*OPTIONS_KEY/)
+    expect(source).toMatch(/try \{[^}]*localStorage\.getItem\(OPTIONS_KEY\)/s)
   })
 
   it("shows the changes as text, with a sign that does not depend on color", async () => {

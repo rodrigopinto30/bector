@@ -3,6 +3,10 @@
  * so the page and the main program can both import it.
  */
 
+import type { FixOptions } from "./options"
+
+export type { FixOptions } from "./options"
+
 export type DockerProblem = "missing" | "daemon" | "permission" | "compose"
 
 export type DockerStatus =
@@ -97,6 +101,8 @@ export interface FixResult {
   outcome: FixOutcome
   /** What to tell the user, in a sentence or two. */
   message: string
+  /** After tests that fail, the errors they show, in the order the system numbers them. */
+  errors?: string[]
 }
 
 export interface FixStatus {
@@ -168,14 +174,17 @@ export interface HealerApi {
    * Applies the fix with that id to the project. The app asks first, in its own dialog, and
    * applies only the fix that was reviewed: if the saved fix is another one, nothing happens.
    */
-  fixApply(id: string): Promise<FixResult>
-  /** Runs the tests of the project in the sandbox. Nothing is changed. */
-  fixTest(): Promise<FixResult>
+  fixApply(id: string, options?: FixOptions): Promise<FixResult>
+  /**
+   * Runs the tests of the project in the sandbox. Nothing is changed. ``options`` are checked
+   * again by the main process; only the test command matters here.
+   */
+  fixTest(options?: FixOptions): Promise<FixResult>
   /**
    * Looks for a fix and saves it, without applying it. The app asks first, in its own dialog,
    * because Claude may be asked for patches, which spends tokens.
    */
-  fixFind(): Promise<FixResult>
+  fixFind(options?: FixOptions): Promise<FixResult>
   /** Stops what is running. */
   fixCancel(): Promise<void>
   /** Shows a section. The panel is shown by the app on top of the page, in the content area. */
