@@ -460,3 +460,30 @@ body {
 .diff-line.added {
   background: var(--tint-mint);
 }
+
+.options-summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.field {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.9rem 0 0;
+}
+
+.field-label {
+  font-weight: 600;
+}
+
+.field-help {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted-foreground);
+}
+
+.field-problem {
+  margin: 0.8rem 0 0;
+  font-weight: 600;
+  color: var(--destructive);
+}

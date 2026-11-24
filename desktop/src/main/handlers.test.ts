@@ -99,11 +99,11 @@ function setup(
     fix: {
       status: async () => ({ running: null as FixKind | null, saved: false }),
       test: async (...given: unknown[]) => {
-        fixed.push(`test(${given.length})`)
+        fixed.push(`test(${JSON.stringify(given)})`)
         return DONE("test")
       },
       find: async (...given: unknown[]) => {
-        fixed.push(`find(${given.length})`)
+        fixed.push(`find(${JSON.stringify(given)})`)
         return DONE("fix")
       },
       review: async (...given: unknown[]) => {
@@ -111,7 +111,7 @@ function setup(
         return { review: null, message: "There is no saved fix. Look for one first." }
       },
       apply: async (...given: unknown[]) => {
-        fixed.push(`apply(${given.join(",")})`)
+        fixed.push(`apply(${JSON.stringify(given)})`)
         return DONE("apply")
       },
       forget: async () => {
@@ -334,15 +334,63 @@ describe("the fix", () => {
     expect(await handlers["fix:status"]()).toEqual({ running: null, saved: false })
   })
 
-  it("runs the tests and looks for a fix with what the system decides, never with what the page says", async () => {
+  const NOTHING = '[{"command":"","attempts":null,"error":1}]'
+
+  it("runs the tests and looks for a fix with the system's own choices when the page chooses nothing", async () => {
     const { handlers, fixed } = setup()
-    const fromPage = ["--apply", "rm -rf /", { command: "anything" }]
     const asPage = (name: "fix:test" | "fix:find" | "fix:cancel") =>
-      (handlers[name] as (...values: unknown[]) => Promise<unknown>)(...fromPage)
+      (handlers[name] as (...values: unknown[]) => Promise<unknown>)()
     expect(await asPage("fix:test")).toEqual(DONE("test"))
     expect(await asPage("fix:find")).toEqual(DONE("fix"))
     await asPage("fix:cancel")
-    expect(fixed).toEqual(["test(0)", "find(0)", "cancel(0)"])
+    expect(fixed).toEqual([`test(${NOTHING})`, `find(${NOTHING})`, "cancel(0)"])
+  })
+
+  it("gives the fixer what the user chose, checked and cleaned, and nothing else the page says", async () => {
+    const { handlers, fixed } = setup()
+    const chosen = {
+      command: "  pytest tests/unit -x  ",
+      attempts: "3",
+      error: 2,
+      apply: true,
+      path: "/etc",
+    }
+    const asPage = handlers["fix:find"] as (...values: unknown[]) => Promise<unknown>
+    await asPage(chosen)
+    await (handlers["fix:test"] as (...values: unknown[]) => Promise<unknown>)({
+      command: "python -m pytest",
+      attempts: null,
+    })
+    expect(fixed).toEqual([
+      'find([{"command":"pytest tests/unit -x","attempts":3,"error":2}])',
+      'test([{"command":"python -m pytest","attempts":null,"error":1}])',
+    ])
+  })
+
+  it.each([
+    ["a command that is not text", { command: 7 }],
+    ["a command that starts as an option", { command: "--json" }],
+    ["a command of several lines", { command: "pytest\nrm -rf /" }],
+    ["a command with a control character", { command: "pytest\u0000" }],
+    ["a command that is too long", { command: `pytest ${"x".repeat(200)}` }],
+    ["no attempts at all", { attempts: 0 }],
+    ["too many attempts", { attempts: 11 }],
+    ["attempts that are not a number", { attempts: "many" }],
+    ["attempts that are not whole", { attempts: 1.5 }],
+    ["an error number of zero", { error: 0 }],
+    ["an error number that is too high", { error: 101 }],
+    ["an error number that is not a number", { error: "first" }],
+    ["choices that are a text", "pytest"],
+    ["choices that are a list", ["pytest"]],
+  ])("refuses %s, and runs nothing", async (_name, choice) => {
+    const { handlers, fixed } = setup()
+    for (const name of ["fix:test", "fix:find"] as const) {
+      expect(() => (handlers[name] as (...values: unknown[]) => unknown)(choice)).toThrow()
+    }
+    expect(() =>
+      (handlers["fix:apply"] as (...values: unknown[]) => unknown)("a".repeat(64), choice),
+    ).toThrow()
+    expect(fixed).toEqual([])
   })
 
   it("shows the saved fix without taking anything from the page", async () => {
@@ -360,7 +408,17 @@ describe("the fix", () => {
     const id = "a".repeat(64)
     const apply = handlers["fix:apply"] as (...values: unknown[]) => Promise<unknown>
     expect(await apply(id, { path: "/etc/passwd" }, "--yes")).toEqual(DONE("apply"))
-    expect(fixed).toEqual([`apply(${id})`])
+    expect(fixed).toEqual([`apply(["${id}",{"command":"","attempts":null,"error":1}])`])
+  })
+
+  it("tests the fix again with the test command the user chose", async () => {
+    const { handlers, fixed } = setup()
+    const id = "b".repeat(64)
+    const apply = handlers["fix:apply"] as (...values: unknown[]) => Promise<unknown>
+    await apply(id, { command: "pytest tests/unit", attempts: 9, error: 4 })
+    expect(fixed).toEqual([
+      `apply(["${id}",{"command":"pytest tests/unit","attempts":9,"error":4}])`,
+    ])
   })
 
   it.each([

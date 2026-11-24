@@ -16,6 +16,7 @@ import type {
 import type { Fixer } from "./fix"
 import { checkKey, isUsable, normalizeKey, type Fetch } from "./key"
 import { isSection, isWindowAction, parseBounds } from "./layout"
+import { checkOptions, type FixOptions } from "../shared/options"
 import { isPatchId } from "./patch"
 import { isAllowedExternal } from "./policy"
 import type { Stack } from "./stack"
@@ -41,6 +42,15 @@ export interface HandlerDeps {
     chooseFolder(): Promise<string | null>
   }
   openExternal(url: string): Promise<void>
+}
+
+/** What the user chose about a run, or an error saying what is wrong with it. */
+function chosen(value: unknown): FixOptions {
+  const checked = checkOptions(value)
+  if (!checked.ok) {
+    throw new Error(checked.problem)
+  }
+  return checked.options
 }
 
 function text(value: unknown, limit: number, what: string): string {
@@ -109,19 +119,19 @@ export function createHandlers(deps: HandlerDeps) {
       return project
     },
     "fix:status": (): Promise<FixStatus> => deps.fix.status(),
-    "fix:test": (): Promise<FixResult> => deps.fix.test(),
+    "fix:test": (options?: unknown): Promise<FixResult> => deps.fix.test(chosen(options)),
     // Asking before Claude is used is the job of the main process, not of the page: whatever
     // the page asks, it is the dialog of the app that decides.
-    "fix:find": (): Promise<FixResult> => deps.fix.find(),
+    "fix:find": (options?: unknown): Promise<FixResult> => deps.fix.find(chosen(options)),
     "fix:review": (): Promise<FixReviewResult> => deps.fix.review(),
     // The page gives back only the id of the fix it was shown. The fix itself is read by the main
     // process, and is applied only if it is that one, after the user says yes in a dialog of the
     // app: the page cannot give a patch, a path or an option.
-    "fix:apply": (id: unknown): Promise<FixResult> => {
+    "fix:apply": (id: unknown, options?: unknown): Promise<FixResult> => {
       if (!isPatchId(id)) {
         throw new Error("that is not the id of a fix")
       }
-      return deps.fix.apply(id)
+      return deps.fix.apply(id, chosen(options))
     },
     "fix:cancel": (): Promise<void> => deps.fix.cancel(),
     "section:show": async (section: unknown): Promise<void> => {

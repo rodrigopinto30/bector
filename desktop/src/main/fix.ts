@@ -1,4 +1,5 @@
 import type { FixKind, FixResult, FixReviewResult, FixStatus, StackStatus } from "../shared/api"
+import { DEFAULT_OPTIONS, type FixOptions } from "../shared/options"
 import { filesOf, patchId, readPatch } from "./patch"
 import type { Run } from "./process"
 
@@ -43,6 +44,12 @@ export interface FixDeps {
   onLine(line: string): void
 }
 
+/**
+ * How the system numbers the errors that the tests show: ``[1] AssertionError: ...``. Only the
+ * numbers that follow one another from 1 count, so no other line can pass for one.
+ */
+const ERROR_LINE = /^\[(\d{1,3})\] (.+)$/
+
 /** The text of an Anthropic key, which must never reach the page. */
 const KEY_SHAPE = /sk-ant-[A-Za-z0-9_-]{8,}/g
 
@@ -77,12 +84,12 @@ export class Fixer {
     return { running, saved: (await this.quiet(["test", "-s", PATCH_FILE])).code === 0 }
   }
 
-  test(): Promise<FixResult> {
-    return this.go("test")
+  test(options: FixOptions = DEFAULT_OPTIONS): Promise<FixResult> {
+    return this.go("test", "", options)
   }
 
-  find(): Promise<FixResult> {
-    return this.go("fix")
+  find(options: FixOptions = DEFAULT_OPTIONS): Promise<FixResult> {
+    return this.go("fix", "", options)
   }
 
   /** The saved fix, as it will be applied. Nothing is changed. */
@@ -105,9 +112,12 @@ export class Fixer {
     return { review: { id: patchId(saved), ...patch }, message: "" }
   }
 
-  /** Applies the saved fix, only if it is the one with that id. */
-  apply(id: string): Promise<FixResult> {
-    return this.go("apply", id)
+  /**
+   * Applies the saved fix, only if it is the one with that id. It is tested again with the test
+   * command of ``options``.
+   */
+  apply(id: string, options: FixOptions = DEFAULT_OPTIONS): Promise<FixResult> {
+    return this.go("apply", id, options)
   }
 
   /** The saved fix belonged to the project that was chosen before: it goes. */
@@ -132,14 +142,14 @@ export class Fixer {
     }
   }
 
-  private async go(kind: FixKind, id = ""): Promise<FixResult> {
+  private async go(kind: FixKind, id: string, options: FixOptions): Promise<FixResult> {
     if (this.current !== null) {
       return refused(kind, "Something is already running. Wait for it, or stop it.")
     }
     const current: Current = { kind, cancelled: false, started: false, sandboxBusy: false }
     this.current = current
     try {
-      return await this.perform(current, id)
+      return await this.perform(current, id, options)
     } finally {
       this.current = null
     }
@@ -171,21 +181,25 @@ export class Fixer {
     return read.code === 0 && read.stdout.trim() !== "" ? read.stdout : null
   }
 
-  private async perform(current: Current, id: string): Promise<FixResult> {
+  private async perform(current: Current, id: string, options: FixOptions): Promise<FixResult> {
     const { kind } = current
     const { problem, stack } = await this.notReady()
     if (problem !== "") {
       return refused(kind, problem)
     }
     if (kind === "apply") {
-      return this.runApply(current, id)
+      return this.runApply(current, id, options)
     }
     if (kind === "fix" && stack.keySeen === true) {
       const accepted = await this.deps.confirm({
         title: "Look for a fix",
         message: "Look for a fix for the tests of your project?",
         detail:
-          "The system may ask Claude for patches with your Anthropic key, which spends tokens, up to the limits in its settings. " +
+          `The system may ask Claude for patches with your Anthropic key, which spends tokens, up to ${
+            options.attempts === null
+              ? "the limits in its settings"
+              : `${options.attempts === 1 ? "1 attempt" : `${options.attempts} attempts`} and the token limit in its settings`
+          }. ` +
           "A fix already stored on this computer, or one from your team, is tried first and costs nothing. " +
           "Your files are not changed: the fix is only saved.",
         ok: "Look for a fix",
@@ -197,11 +211,15 @@ export class Fixer {
     if (current.cancelled) {
       return cancelled(kind, false)
     }
-    return kind === "test" ? this.runTests(current) : this.runFix(current)
+    return kind === "test" ? this.runTests(current, options) : this.runFix(current, options)
   }
 
-  private async runTests(current: Current): Promise<FixResult> {
-    const outcome = await this.inside(current, ["healer", "test"], TEST_TIMEOUT_MS)
+  private async runTests(current: Current, options: FixOptions): Promise<FixResult> {
+    const outcome = await this.inside(
+      current,
+      ["healer", "test", ...commandOf(options)],
+      TEST_TIMEOUT_MS,
+    )
     if (current.cancelled) {
       return cancelled("test", current.sandboxBusy)
     }
@@ -220,17 +238,28 @@ export class Fixer {
           kind: "test",
           outcome: "failed",
           message: "The output below says which ones, and why.",
+          ...(outcome.errors.length > 0 ? { errors: outcome.errors } : {}),
         }
       default:
         return failedToRun("test", "", outcome.error)
     }
   }
 
-  private async runFix(current: Current): Promise<FixResult> {
+  private async runFix(current: Current, options: FixOptions): Promise<FixResult> {
     await this.quiet(["rm", "-f", PATCH_FILE])
     const outcome = await this.inside(
       current,
-      ["healer", "run", "--no-apply", "--save", PATCH_FILE],
+      [
+        "healer",
+        "run",
+        ...commandOf(options),
+        "--no-apply",
+        "--save",
+        PATCH_FILE,
+        "--error",
+        String(options.error),
+        ...(options.attempts === null ? [] : ["--attempts", String(options.attempts)]),
+      ],
       FIND_TIMEOUT_MS,
     )
     if (current.cancelled) {
@@ -264,7 +293,7 @@ export class Fixer {
     return failedToRun("fix", "", outcome.error)
   }
 
-  private async runApply(current: Current, id: string): Promise<FixResult> {
+  private async runApply(current: Current, id: string, options: FixOptions): Promise<FixResult> {
     const saved = await this.readSaved()
     if (saved === null) {
       return refused("apply", "There is no saved fix. Look for one first.")
@@ -293,7 +322,7 @@ export class Fixer {
     // nothing can change the fix between the review and the application.
     const outcome = await this.inside(
       current,
-      ["healer", "apply", "-", "--yes"],
+      ["healer", "apply", "-", ...commandOf(options), "--yes"],
       APPLY_TIMEOUT_MS,
       saved,
     )
@@ -322,6 +351,7 @@ export class Fixer {
   /** Runs a command of the system in the cli container, line by line. */
   private async inside(current: Current, command: string[], timeoutMs: number, input?: string) {
     let error = ""
+    const errors: string[] = []
     current.started = true
     const result = await this.deps.run(
       "docker",
@@ -348,6 +378,10 @@ export class Fixer {
           if (shown.startsWith("error:")) {
             error = shown.slice("error:".length).trim()
           }
+          const listed = ERROR_LINE.exec(shown)
+          if (listed !== null && Number(listed[1]) === errors.length + 1) {
+            errors.push((listed[2] ?? "").trim())
+          }
           this.deps.onLine(shown)
         },
       },
@@ -361,7 +395,7 @@ export class Fixer {
     if (stopped) {
       current.sandboxBusy = !(await this.freeSandbox())
     }
-    return { code: result.code, failed: result.failed, error }
+    return { code: result.code, failed: result.failed, error, errors }
   }
 
   /**
@@ -394,6 +428,11 @@ export class Fixer {
       timeoutMs: 30_000,
     })
   }
+}
+
+/** The test command as the program's argument, or nothing for the system's own. */
+function commandOf(options: FixOptions): string[] {
+  return options.command === "" ? [] : [options.command]
 }
 
 function noReview(message: string): FixReviewResult {

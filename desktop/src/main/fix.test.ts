@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { StackStatus } from "../shared/api"
+import { DEFAULT_OPTIONS, type FixOptions } from "../shared/options"
 import { clean, explain, Fixer, PATCH_FILE, type FixDeps, type Question } from "./fix"
 import { patchId } from "./patch"
 import type { Run, RunOptions, RunResult } from "./process"
@@ -50,6 +51,7 @@ interface Options {
 /** A computer with the services as given, and a container that runs what it is told. */
 function computer(options: Options = {}) {
   const calls: string[] = []
+  const argvs: Array<readonly string[]> = []
   const lines: string[] = []
   const questions: Question[] = []
   const slept: number[] = []
@@ -70,6 +72,7 @@ function computer(options: Options = {}) {
   const run: Run = async (file, args, runOptions: RunOptions = {}) => {
     const line = [file, ...args].join(" ")
     calls.push(line)
+    argvs.push(args)
     if (line.includes(" rm -f /data/healer/fix.json")) {
       removed += 1
       return result(0)
@@ -136,6 +139,12 @@ function computer(options: Options = {}) {
     questions,
     slept,
     waitForStart,
+    argvs,
+    /** What was handed to the program of the system, one argument each. */
+    healerArgs: () =>
+      argvs
+        .map((args) => args.slice(args.indexOf("healer")))
+        .filter((args) => args[0] === "healer"),
     inputs,
     open: () => open(),
     /** The saved fix is replaced by another, as when someone looks for a fix in a terminal. */
@@ -724,5 +733,150 @@ describe("applying the fix", () => {
     expect((await fixer.apply(id)).outcome).toBe("refused")
     open()
     await applying
+  })
+})
+
+describe("what the user chose", () => {
+  const chosen = (change: Partial<FixOptions>): FixOptions => ({ ...DEFAULT_OPTIONS, ...change })
+
+  it("gives the system its own choices when the user chose nothing", async () => {
+    const tests = computer({ code: 0 })
+    await tests.fixer.test()
+    expect(tests.healerArgs()).toEqual([["healer", "test"]])
+    const search = computer({ code: 0, saved: true })
+    await search.fixer.find()
+    expect(search.healerArgs()).toEqual([
+      ["healer", "run", "--no-apply", "--save", PATCH_FILE, "--error", "1"],
+    ])
+  })
+
+  it("gives the test command as one argument, which no shell reads, to the tests", async () => {
+    const { fixer, healerArgs } = computer({ code: 0 })
+    await fixer.test(chosen({ command: "pytest tests/unit -x; rm -rf /" }))
+    expect(healerArgs()).toEqual([["healer", "test", "pytest tests/unit -x; rm -rf /"]])
+  })
+
+  it("gives the command, the error and the attempts to the search", async () => {
+    const { fixer, healerArgs } = computer({ code: 0, saved: true })
+    await fixer.find(chosen({ command: "pytest tests/unit", error: 2, attempts: 4 }))
+    expect(healerArgs()).toEqual([
+      [
+        "healer",
+        "run",
+        "pytest tests/unit",
+        "--no-apply",
+        "--save",
+        PATCH_FILE,
+        "--error",
+        "2",
+        "--attempts",
+        "4",
+      ],
+    ])
+  })
+
+  it("tests the fix again with the command, when it is applied", async () => {
+    const patch = saved("app.py")
+    const { fixer, healerArgs } = computer({ patch, code: 0 })
+    await fixer.apply(
+      patchId(patch),
+      chosen({ command: "pytest tests/unit", attempts: 5, error: 3 }),
+    )
+    expect(healerArgs()).toEqual([["healer", "apply", "-", "pytest tests/unit", "--yes"]])
+  })
+
+  it("never gives the error or the attempts to what does not use them", async () => {
+    const tests = computer({ code: 0 })
+    await tests.fixer.test(chosen({ error: 3, attempts: 7 }))
+    expect(tests.healerArgs()).toEqual([["healer", "test"]])
+    const patch = saved("app.py")
+    const applying = computer({ patch, code: 0 })
+    await applying.fixer.apply(patchId(patch), chosen({ error: 3, attempts: 7 }))
+    expect(applying.healerArgs()).toEqual([["healer", "apply", "-", "--yes"]])
+  })
+
+  it("says in the question how many attempts the user allowed", async () => {
+    const detail = async (options: FixOptions) => {
+      const { fixer, questions } = computer({ code: 0, saved: true })
+      await fixer.find(options)
+      return questions[0]?.detail ?? ""
+    }
+    expect(await detail(chosen({}))).toContain("up to the limits in its settings")
+    expect(await detail(chosen({ attempts: 1 }))).toContain(
+      "up to 1 attempt and the token limit in its settings",
+    )
+    expect(await detail(chosen({ attempts: 6 }))).toContain(
+      "up to 6 attempts and the token limit in its settings",
+    )
+  })
+
+  it("shows the system's own reason when it does not allow the command", async () => {
+    const { fixer } = computer({
+      code: 2,
+      prints: ["error: Command not allowed: 'ls'. Allowed: pytest, python -m pytest"],
+    })
+    expect((await fixer.test(chosen({ command: "ls" }))).message).toBe(
+      "The tests could not be run: Command not allowed: 'ls'. Allowed: pytest, python -m pytest",
+    )
+  })
+})
+
+describe("the errors the tests show", () => {
+  const FAILING = [
+    "sandbox    2 files copied to an isolated copy, then deleted",
+    "command    python -m pytest",
+    "result     tests failed (exit 1) in 1.9s",
+    "",
+    "[1] AssertionError: assert -2 == 10",
+    "    signature  70983271ad01",
+    "    origin     test_app.py:5 in test_sumar",
+    "",
+    "[2] ZeroDivisionError: division by zero",
+    "    signature  1111111111aa",
+    "",
+    "[3] KeyError: 'name'",
+  ]
+
+  it("are listed with what the system says of each, in its order", async () => {
+    const { fixer } = computer({ code: 1, prints: FAILING })
+    const outcome = await fixer.test()
+    expect(outcome.outcome).toBe("failed")
+    expect(outcome.errors).toEqual([
+      "AssertionError: assert -2 == 10",
+      "ZeroDivisionError: division by zero",
+      "KeyError: 'name'",
+    ])
+  })
+
+  it("count only the lines that follow the numbering from 1", async () => {
+    const { fixer } = computer({
+      code: 1,
+      prints: [
+        "[2] a line that is not the first",
+        "[1] the first",
+        "    [2] indented, so it is not one",
+        "[3] a number that skips one",
+        "[2] the second",
+        "[2] the second again",
+      ],
+    })
+    expect((await fixer.test()).errors).toEqual(["the first", "the second"])
+  })
+
+  it("leave no list when the tests show none, or pass", async () => {
+    const none = await computer({
+      code: 1,
+      prints: ["result     tests failed (exit 1)"],
+    }).fixer.test()
+    expect(none.outcome).toBe("failed")
+    expect("errors" in none).toBe(false)
+    const passed = await computer({ code: 0, prints: ["[1] this is not an error"] }).fixer.test()
+    expect(passed.outcome).toBe("passed")
+    expect("errors" in passed).toBe(false)
+  })
+
+  it("hide a key that an error says", async () => {
+    const { fixer } = computer({ code: 1, prints: [`[1] ValueError: bad key ${KEY}`] })
+    expect((await fixer.test()).errors).toEqual(["ValueError: bad key [hidden]"])
   })
 })

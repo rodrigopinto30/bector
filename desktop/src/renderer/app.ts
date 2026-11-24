@@ -15,6 +15,7 @@ import type {
   StackResult,
   StackStatus,
 } from "../shared/api"
+import type { FixOptions } from "../shared/options"
 
 declare global {
   interface Window {
@@ -66,6 +67,7 @@ export const SECTIONS: ReadonlyArray<{ id: Section; label: string }> = [
 const CONSOLE_URL = "https://console.anthropic.com/settings/keys"
 const DOCKER_GUIDE_URL = "https://docs.docker.com/engine/install/"
 const SIDEBAR_KEY = "healer.sidebar"
+const OPTIONS_KEY = "healer.fix-options"
 
 export function dockerCard(status: DockerStatus | null): Card {
   if (status === null) {
@@ -526,6 +528,88 @@ export function reviewCard(review: FixReview): Card {
   }
 }
 
+// The rules for what may be chosen are those of the main process (shared/options.ts), copied
+// here because the page is built into one file that imports nothing. A test keeps the two in step.
+const COMMAND_LIMIT = 200
+const ATTEMPTS_RANGE = { min: 1, max: 10 } as const
+const ERROR_RANGE = { min: 1, max: 100 } as const
+
+function hasControl(text: string): boolean {
+  return [...text].some((character) => {
+    const code = character.codePointAt(0) ?? 0
+    return code < 32 || code === 127
+  })
+}
+
+function whole(value: unknown, min: number, max: number): number | null {
+  const number = typeof value === "string" && /^\d{1,6}$/.test(value) ? Number(value) : value
+  return typeof number === "number" && Number.isInteger(number) && number >= min && number <= max
+    ? number
+    : null
+}
+
+/** Whether what the fields hold can be used, and what to say when it cannot. */
+export function checkChoice(choice: {
+  command: string
+  attempts: string
+  error: number
+}): { ok: true; options: FixOptions } | { ok: false; problem: string } {
+  const command = choice.command.trim()
+  if (command.length > COMMAND_LIMIT || hasControl(command) || command.startsWith("-")) {
+    return {
+      ok: false,
+      problem: `The test command must be one line of at most ${COMMAND_LIMIT} characters that starts with a command, such as pytest, and not with an option.`,
+    }
+  }
+  const attempts =
+    choice.attempts.trim() === ""
+      ? null
+      : whole(choice.attempts.trim(), ATTEMPTS_RANGE.min, ATTEMPTS_RANGE.max)
+  if (choice.attempts.trim() !== "" && attempts === null) {
+    return {
+      ok: false,
+      problem: `The attempts must be a whole number from ${ATTEMPTS_RANGE.min} to ${ATTEMPTS_RANGE.max}.`,
+    }
+  }
+  const error = whole(choice.error, ERROR_RANGE.min, ERROR_RANGE.max)
+  if (error === null) {
+    return {
+      ok: false,
+      problem: `The error must be a whole number from ${ERROR_RANGE.min} to ${ERROR_RANGE.max}.`,
+    }
+  }
+  return { ok: true, options: { command, attempts, error } }
+}
+
+/** One way to choose which error of the tests to fix. */
+export interface ErrorChoice {
+  value: number
+  label: string
+}
+
+const CHOICE_LIMIT = 90
+
+/**
+ * The errors the tests showed, as the choices of a list: their number, and the start of what
+ * each one says. Before any tests ran there is only the first.
+ */
+export function errorChoices(errors: readonly string[]): ErrorChoice[] {
+  if (errors.length === 0) {
+    return [{ value: 1, label: "The first error" }]
+  }
+  return errors.map((summary, index) => ({
+    value: index + 1,
+    label: `${index + 1} · ${summary.length > CHOICE_LIMIT ? `${summary.slice(0, CHOICE_LIMIT)}…` : summary}`,
+  }))
+}
+
+export const OPTIONS_HELP = {
+  command: `Leave it empty to use the system's own. The system allows only pytest and python -m pytest, with arguments that stay inside the project, such as pytest tests/unit -x. At most ${COMMAND_LIMIT} characters.`,
+  attempts: `The most patches the system tries before it gives up, from ${ATTEMPTS_RANGE.min} to ${ATTEMPTS_RANGE.max}. Leave it empty to use the system's own number.`,
+  error:
+    "When the tests show more than one error, which of them to fix. A fix counts only when every test passes with it, so this helps when the errors have one cause. Run the tests to list them.",
+} as const
+
 export const FIX_FAILED: FixResult = {
   kind: "test",
   outcome: "error",
@@ -674,6 +758,34 @@ function banner(notice: Notice, onDismiss?: () => void): HTMLElement {
   return element
 }
 
+function rememberedChoice(): { command: string; attempts: string } {
+  try {
+    const raw = window.localStorage.getItem(OPTIONS_KEY)
+    const value: unknown = raw === null ? null : JSON.parse(raw)
+    if (typeof value === "object" && value !== null) {
+      const { command, attempts } = value as Record<string, unknown>
+      return {
+        command: typeof command === "string" ? command : "",
+        attempts: typeof attempts === "string" ? attempts : "",
+      }
+    }
+  } catch {
+    // Nothing was kept, or it cannot be read.
+  }
+  return { command: "", attempts: "" }
+}
+
+function rememberChoice(choice: { command: string; attempts: string }): void {
+  try {
+    window.localStorage.setItem(
+      OPTIONS_KEY,
+      JSON.stringify({ command: choice.command, attempts: choice.attempts }),
+    )
+  } catch {
+    // The choice is only not kept.
+  }
+}
+
 function remembered(): boolean {
   try {
     return window.localStorage.getItem(SIDEBAR_KEY) !== "collapsed"
@@ -706,6 +818,7 @@ function main(): void {
     project: byId("project-card"),
     fix: byId("fix-card"),
     review: byId("fix-review"),
+    options: byId("fix-options"),
     fixLog: byId("fix-log"),
     docker: byId("docker"),
     key: byId("key"),
@@ -732,6 +845,10 @@ function main(): void {
     saved: false,
     review: null as FixReview | null,
     reviewing: false,
+    /** What the user chose about a run, as the fields hold it, and the errors the tests showed. */
+    choice: { ...rememberedChoice(), error: 1 },
+    errors: [] as string[],
+    optionsProblem: "",
     stack: null as StackStatus | null,
     busy: false,
     message: "",
@@ -872,6 +989,7 @@ function main(): void {
     renderControls()
     renderProject()
     renderFix()
+    renderOptions()
     renderReview()
     renderDocker()
     renderKey()
@@ -905,6 +1023,95 @@ function main(): void {
       )
     }
     draw(sections.project, projectCard(info, state.stack), ...controls)
+  }
+
+  // ---- what the user may choose about a run: the test command, the attempts and the error ----
+  const optionControls = (() => {
+    const field = (id: string, label: string, help: string, control: HTMLElement): HTMLElement => {
+      const labelElement = node("label", "field-label", label)
+      labelElement.htmlFor = id
+      control.id = id
+      const helpElement = node("p", "field-help", help)
+      helpElement.id = `${id}-help`
+      control.setAttribute("aria-describedby", helpElement.id)
+      return node("div", "field", "", labelElement, control, helpElement)
+    }
+    const command = node("input", "input")
+    command.type = "text"
+    command.autocomplete = "off"
+    command.spellcheck = false
+    command.placeholder = "python -m pytest"
+    command.maxLength = COMMAND_LIMIT
+    command.value = state.choice.command
+    const attempts = node("input", "input")
+    attempts.type = "number"
+    attempts.min = String(ATTEMPTS_RANGE.min)
+    attempts.max = String(ATTEMPTS_RANGE.max)
+    attempts.placeholder = "the system's own"
+    attempts.value = state.choice.attempts
+    const error = node("select", "input")
+    const problem = node("p", "field-problem")
+    problem.setAttribute("role", "alert")
+    problem.hidden = true
+    const details = node(
+      "details",
+      "options",
+      "",
+      node("summary", "options-summary", "Options"),
+      field("fix-command", "Test command", OPTIONS_HELP.command, command),
+      field("fix-attempts", "Attempts", OPTIONS_HELP.attempts, attempts),
+      field("fix-error", "Error to fix", OPTIONS_HELP.error, error),
+      problem,
+    )
+    sections.options.replaceChildren(details)
+    const changed = () => {
+      state.choice.command = command.value
+      state.choice.attempts = attempts.value
+      state.optionsProblem = ""
+      problem.textContent = ""
+      problem.hidden = true
+      rememberChoice(state.choice)
+    }
+    command.addEventListener("input", changed)
+    attempts.addEventListener("input", changed)
+    error.addEventListener("change", () => {
+      state.choice.error = Number(error.value)
+    })
+    return { details, command, attempts, error, problem }
+  })()
+
+  function renderOptions(): void {
+    const busy = state.fix !== null
+    optionControls.command.disabled = busy
+    optionControls.attempts.disabled = busy
+    const choices = errorChoices(state.errors)
+    optionControls.error.replaceChildren(
+      ...choices.map((choice) => {
+        const option = node("option", "", choice.label)
+        option.value = String(choice.value)
+        return option
+      }),
+    )
+    optionControls.error.value = String(
+      state.choice.error <= choices.length ? state.choice.error : 1,
+    )
+    optionControls.error.disabled = busy || state.errors.length < 2
+    optionControls.problem.textContent = state.optionsProblem
+    optionControls.problem.hidden = state.optionsProblem === ""
+  }
+
+  /** What the user chose, if it can be used; otherwise the options open and say what is wrong. */
+  function takeOptions(): FixOptions | null {
+    const checked = checkChoice(state.choice)
+    if (!checked.ok) {
+      state.optionsProblem = checked.problem
+      optionControls.details.open = true
+      renderOptions()
+      return null
+    }
+    state.optionsProblem = ""
+    renderOptions()
+    return checked.options
   }
 
   function renderFix(): void {
@@ -967,15 +1174,21 @@ function main(): void {
       sections.fixLog.hidden = true
       state.review = null
       state.saved = false
+      state.errors = []
+      state.choice.error = 1
     }
   }
 
   async function runFix(kind: "test" | "fix"): Promise<void> {
+    const options = takeOptions()
+    if (options === null) {
+      return
+    }
     if (kind === "fix") {
       // A new search replaces the saved fix, so the one on screen is about to be gone.
       state.review = null
     }
-    await perform(kind, () => (kind === "test" ? api.fixTest() : api.fixFind()))
+    await perform(kind, () => (kind === "test" ? api.fixTest(options) : api.fixFind(options)))
   }
 
   /** Asks for the saved fix, to show it. Nothing is changed. */
@@ -1008,7 +1221,11 @@ function main(): void {
     if (review === null) {
       return
     }
-    await perform("apply", () => api.fixApply(review.id))
+    const options = takeOptions()
+    if (options === null) {
+      return
+    }
+    await perform("apply", () => api.fixApply(review.id, options))
   }
 
   function closeReview(): void {
@@ -1045,6 +1262,11 @@ function main(): void {
     }
     if (kind === "apply" && result.outcome !== "declined") {
       state.review = null
+    }
+    if (kind === "test" && (result.outcome === "failed" || result.outcome === "passed")) {
+      // The errors the tests showed, for choosing which one to fix.
+      state.errors = result.errors ?? []
+      state.choice.error = 1
     }
     state.saved = (await api.fixStatus().catch(() => ({ running: null, saved: false }))).saved
     if (result.outcome === "refused") {
