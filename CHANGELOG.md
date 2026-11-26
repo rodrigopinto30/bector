@@ -6,6 +6,7 @@ Every notable change to this project, newest first. The format follows [Keep a C
 
 ### Added
 
+- The desktop app can use an Anthropic key for **this session only**: **Use this session only** checks the key with Anthropic and keeps it in the memory of the app, never in a file, until the app closes or **Stop using it** is pressed. When the system's secret store cannot keep a key (it is locked, or there is none), this is how a key is given: the main button becomes **Check and use this session**, and nothing asks the secret store, so there is no wait. The key of the session is the one the services get when they are restarted, and the services keep it until they restart without it.
 - The **Fix** section of the desktop app has **Options**: the test command (for example `pytest tests/unit -x`, which also tests a fix again when it is applied), how many patches to try, and which of the errors that the tests show to fix. The system still allows only `pytest` and `python -m pytest` with arguments inside the project, and the app says so when it refuses a command. The choices are checked by the page and again by the app's main process, and a command reaches the system as one argument that no shell reads. The command and the attempts are kept for the next time.
 
 ## [1.3.0] - 2026-11-24
