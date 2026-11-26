@@ -8,6 +8,7 @@ import type {
   HealerApi,
   KeyCheck,
   KeySave,
+  KeySession,
   KeyStatus,
   ProjectChoice,
   ProjectInfo,
@@ -154,6 +155,43 @@ export function saveNotice(
   return { tone: said.tone, title: "The key was not saved", text: said.text + kept }
 }
 
+/** What to tell after a key was sent to be used for this session only. */
+export function sessionNotice(outcome: KeySession, servicesRunning: boolean): Notice {
+  if (outcome.accepted) {
+    const limited =
+      outcome.check.state === "limited"
+        ? " Anthropic is limiting its requests right now, but the key works."
+        : ""
+    const next = servicesRunning
+      ? " Restart the services below to start using it."
+      : " Start the services below to use it."
+    return {
+      tone: "good",
+      title: "Key in use for this session",
+      text: `Anthropic accepts it. It is kept in this app's memory only, never saved, and forgotten when you close the app.${limited}${next}`,
+    }
+  }
+  const said = checkMessage(outcome.check)
+  const kept = outcome.session === null ? "" : " The key you were using is unchanged."
+  return { tone: said.tone, title: "The key is not in use", text: said.text + kept }
+}
+
+export const SESSION_FAILED_NOTICE: Notice = {
+  tone: "bad",
+  title: "The key is not in use",
+  text: "The app could not check it. Try again.",
+}
+
+export function endSessionNotice(servicesRunning: boolean): Notice {
+  return {
+    tone: "good",
+    title: "Key forgotten",
+    text: servicesRunning
+      ? "This app no longer holds it. Restart the services below to stop using it."
+      : "This app no longer holds it.",
+  }
+}
+
 export function removeNotice(): Notice {
   return { tone: "good", title: "Key removed", text: "This app no longer stores it." }
 }
@@ -170,6 +208,7 @@ export const KEY_CHECK_FAILED: KeyStatus = {
   reason: "The app could not check the secret store.",
   stored: false,
   masked: "",
+  session: null,
 }
 
 export const ACTION_FAILED: StackResult = {
@@ -227,11 +266,27 @@ export function keyCard(status: KeyStatus | null, systemSeesKey = false): Card {
   if (status === null) {
     return { tone: "idle", title: "Checking your key…", lines: [] }
   }
+  if (status.session !== null) {
+    return {
+      tone: "good",
+      title: "You are using a key for this session",
+      lines: [
+        status.session.masked,
+        "It is kept in this app's memory only, never saved, and forgotten when you close the app. The services keep it until they restart without it.",
+        ...(status.stored
+          ? ["It is used instead of the key saved in this computer's secret store."]
+          : []),
+      ],
+    }
+  }
   if (status.vault === "unavailable") {
     return {
       tone: "warn",
       title: "Your key cannot be saved safely here",
-      lines: [status.reason, "You can still use the app without a key."],
+      lines: [
+        status.reason,
+        "You can use a key for this session only, which is kept in this app's memory and never saved, or use the app without one.",
+      ],
     }
   }
   if (status.stored) {
@@ -1411,7 +1466,8 @@ function main(): void {
     if (keyMessage.notice !== null) {
       controls.push(banner(keyMessage.notice, keyMessage.checking ? undefined : closeMessage))
     }
-    if (status !== null && status.vault === "ready") {
+    if (status !== null) {
+      const saves = status.vault === "ready"
       const input = node("input", "input")
       input.type = "password"
       input.autocomplete = "off"
@@ -1419,23 +1475,40 @@ function main(): void {
       input.placeholder = "Paste your key, sk-ant-…"
       input.setAttribute("aria-label", "Anthropic key")
       input.disabled = keyMessage.checking
-      const save = () => void saveKey(input)
+      // Enter does what the main button does: save the key, or use it for this session when
+      // the secret store cannot keep it.
+      const save = () => void (saves ? saveKey(input) : useKeyOnce(input))
+      const once = () => void useKeyOnce(input)
       input.addEventListener("input", dismissMessage)
       input.addEventListener("keydown", (event) => event.key === "Enter" && save())
       const label = status.stored ? "Check and replace" : "Check and save"
+      const checking = keyMessage.checking
       controls.push(
         input,
         ...actions(
-          button(keyMessage.checking ? "Checking…" : label, save, "primary", keyMessage.checking),
+          ...(saves
+            ? [
+                button(checking ? "Checking…" : label, save, "primary", checking),
+                button("Use this session only", once, "secondary", checking),
+              ]
+            : [
+                button(
+                  checking ? "Checking…" : "Check and use this session",
+                  once,
+                  "primary",
+                  checking,
+                ),
+                button("Check again", () => void checkKey(), "ghost", checking),
+              ]),
           button("Get a key", () => void api.openLink(CONSOLE_URL), "ghost"),
-          ...(status.stored
-            ? [button("Remove it", () => void removeKey(), "ghost", keyMessage.checking)]
+          ...(saves && status.stored
+            ? [button("Remove it", () => void removeKey(), "ghost", checking)]
+            : []),
+          ...(status.session !== null
+            ? [button("Stop using it", () => void endSession(), "ghost", checking)]
             : []),
         ),
       )
-    }
-    if (status !== null && status.vault === "unavailable") {
-      controls.push(...actions(button("Check again", () => void checkKey(), "ghost")))
     }
     draw(sections.key, keyCard(status, state.stack?.keySeen === true), ...controls)
     sections.key.querySelector(".banner")?.scrollIntoView({ block: "nearest" })
@@ -1505,6 +1578,49 @@ function main(): void {
     if (!saved) {
       sections.key.querySelector("input")?.focus()
     }
+  }
+
+  /** The key is used for this session only: the app keeps it in memory, and nowhere else. */
+  async function useKeyOnce(input: HTMLInputElement): Promise<void> {
+    if (keyMessage.checking) {
+      return
+    }
+    const typed = input.value
+    input.value = ""
+    if (!typed.trim()) {
+      keyMessage.show(EMPTY_NOTICE)
+      renderKey()
+      sections.key.querySelector("input")?.focus()
+      return
+    }
+    keyMessage.begin()
+    renderKey()
+    let accepted = false
+    try {
+      const outcome = await api.keyUseOnce(typed)
+      if (state.key !== null) {
+        state.key = { ...state.key, session: outcome.session }
+      }
+      keyMessage.show(sessionNotice(outcome, state.stack?.running === true))
+      state.restart ||= outcome.accepted
+      accepted = outcome.accepted
+    } catch {
+      keyMessage.show(SESSION_FAILED_NOTICE)
+    }
+    render()
+    if (!accepted) {
+      sections.key.querySelector("input")?.focus()
+    }
+  }
+
+  async function endSession(): Promise<void> {
+    await api.keyEndSession().catch(() => undefined)
+    if (state.key !== null) {
+      state.key = { ...state.key, session: null }
+    }
+    keyMessage.show(endSessionNotice(state.stack?.running === true))
+    state.restart = state.stack?.running === true
+    render()
   }
 
   async function removeKey(): Promise<void> {

@@ -5,7 +5,9 @@ import type {
   FixReviewResult,
   FixStatus,
   KeySave,
+  KeySession,
   KeyStatus,
+  VaultStatus,
   ProjectChoice,
   ProjectInfo,
   Section,
@@ -18,6 +20,7 @@ import { checkKey, isUsable, normalizeKey, type Fetch } from "./key"
 import { isSection, isWindowAction, parseBounds } from "./layout"
 import { checkOptions, type FixOptions } from "../shared/options"
 import { isPatchId } from "./patch"
+import type { SessionKey } from "./session"
 import { isAllowedExternal } from "./policy"
 import type { Stack } from "./stack"
 import { VaultError, type KeyVault } from "./vault"
@@ -29,6 +32,7 @@ const MAX_URL_CHARS = 200
 export interface HandlerDeps {
   docker(): Promise<DockerStatus>
   vault: Pick<KeyVault, "status" | "save" | "remove">
+  session: Pick<SessionKey, "set" | "clear" | "info">
   stack: Pick<Stack, "status" | "start" | "stop">
   workspace: Pick<Workspace, "info" | "choose" | "reset">
   fix: Pick<Fixer, "status" | "test" | "find" | "review" | "apply" | "forget" | "cancel">
@@ -66,9 +70,14 @@ function text(value: unknown, limit: number, what: string): string {
  * keep a mistake in it from doing more than its job.
  */
 export function createHandlers(deps: HandlerDeps) {
+  /** What the vault says, with the key that is used for this session only, if any. */
+  const withSession = (status: VaultStatus): KeyStatus => ({
+    ...status,
+    session: deps.session.info(),
+  })
   return {
     "docker:check": (): Promise<DockerStatus> => deps.docker(),
-    "key:status": (): Promise<KeyStatus> => deps.vault.status(),
+    "key:status": async (): Promise<KeyStatus> => withSession(await deps.vault.status()),
     "key:save": async (key: unknown): Promise<KeySave> => {
       const normalized = normalizeKey(text(key, MAX_KEY_CHARS, "the key"))
       const check = await checkKey(normalized, deps.fetchFn)
@@ -80,21 +89,35 @@ export function createHandlers(deps: HandlerDeps) {
       } catch (error) {
         if (error instanceof VaultError) {
           // The store just failed: asking it again would make the user wait a second time.
-          const status: KeyStatus = {
+          const status = withSession({
             vault: "unavailable",
             reason: error.message,
             stored: false,
             masked: "",
-          }
+          })
           return { saved: false, check, status }
         }
         throw error
       }
-      return { saved: true, check, status: await deps.vault.status() }
+      return { saved: true, check, status: withSession(await deps.vault.status()) }
     },
     "key:remove": async (): Promise<KeyStatus> => {
       await deps.vault.remove()
-      return deps.vault.status()
+      return withSession(await deps.vault.status())
+    },
+    // Nothing here asks the secret store: it may be locked, which is when this is wanted, and
+    // asking it would make the user wait. The key goes to the memory of the app and nowhere else.
+    "key:use-once": async (key: unknown): Promise<KeySession> => {
+      const normalized = normalizeKey(text(key, MAX_KEY_CHARS, "the key"))
+      const check = await checkKey(normalized, deps.fetchFn)
+      if (!isUsable(check)) {
+        return { accepted: false, check, session: deps.session.info() }
+      }
+      deps.session.set(normalized)
+      return { accepted: true, check, session: deps.session.info() }
+    },
+    "key:end-session": async (): Promise<void> => {
+      deps.session.clear()
     },
     "stack:status": (): Promise<StackStatus> => deps.stack.status(),
     "stack:start": (restart?: unknown): Promise<StackResult> => deps.stack.start(restart === true),

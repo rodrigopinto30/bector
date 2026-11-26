@@ -20,6 +20,8 @@ const api: HealerApi = {
   keyStatus: () => ipcRenderer.invoke("key:status"),
   keySave: (key) => ipcRenderer.invoke("key:save", key),
   keyRemove: () => ipcRenderer.invoke("key:remove"),
+  keyUseOnce: (key) => ipcRenderer.invoke("key:use-once", key),
+  keyEndSession: () => ipcRenderer.invoke("key:end-session"),
   stackStatus: () => ipcRenderer.invoke("stack:status"),
   stackStart: (restart) => ipcRenderer.invoke("stack:start", restart === true),
   stackStop: () => ipcRenderer.invoke("stack:stop"),

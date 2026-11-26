@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 
-import type { KeyStatus } from "../shared/api"
+import type { VaultStatus } from "../shared/api"
 import { maskKey } from "./key"
 
 /** The part of Electron's safeStorage that the vault uses. */
@@ -108,7 +108,7 @@ export class KeyVault {
     return ""
   }
 
-  async status(): Promise<KeyStatus> {
+  async status(): Promise<VaultStatus> {
     const reason = await this.unavailableReason()
     if (reason) {
       return { vault: "unavailable", reason, stored: false, masked: "" }
