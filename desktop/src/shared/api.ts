@@ -23,13 +23,33 @@ export type KeyCheck =
   | { state: "offline" }
   | { state: "malformed" }
 
-export interface KeyStatus {
+/** What the secret store of the system says about the saved key. */
+export interface VaultStatus {
   vault: "ready" | "unavailable"
   /** Why the vault is unavailable, or why a saved key could not be read; empty otherwise. */
   reason: string
   stored: boolean
   /** The key without its middle, such as sk-ant-…ab12; empty when none is stored. */
   masked: string
+}
+
+/** A key used for this session only, which is not saved anywhere. */
+export interface SessionKeyInfo {
+  /** The key without its middle, such as sk-ant-…ab12. */
+  masked: string
+}
+
+/** The saved key, and the one used for this session only, if any. */
+export interface KeyStatus extends VaultStatus {
+  session: SessionKeyInfo | null
+}
+
+export interface KeySession {
+  /** Whether Anthropic accepted the key, which is then used for this session. */
+  accepted: boolean
+  check: KeyCheck
+  /** The key in use for this session after the attempt, or null. */
+  session: SessionKeyInfo | null
 }
 
 export interface KeySave {
@@ -157,6 +177,14 @@ export interface HealerApi {
   keyStatus(): Promise<KeyStatus>
   keySave(key: string): Promise<KeySave>
   keyRemove(): Promise<KeyStatus>
+  /**
+   * Checks the key with Anthropic and, if it is accepted, uses it for this session only: it is
+   * kept in the memory of the app, never saved, and forgotten when the app closes. It does not
+   * ask the secret store anything, so it works when that store is locked.
+   */
+  keyUseOnce(key: string): Promise<KeySession>
+  /** The app forgets the key it was using for this session. */
+  keyEndSession(): Promise<void>
   stackStatus(): Promise<StackStatus>
   /** With ``restart``, the services are recreated even if they run, to apply a changed key. */
   stackStart(restart?: boolean): Promise<StackResult>

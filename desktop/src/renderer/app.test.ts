@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest"
 import { checkOptions } from "../shared/options"
 import type {
   DockerStatus,
+  KeySession,
   FixOutcome,
   FixResult,
   FixReview,
@@ -46,14 +47,17 @@ import {
   reviewCard,
   reviewSummary,
   SAVE_FAILED_NOTICE,
+  endSessionNotice,
   saveNotice,
   SECTIONS,
+  SESSION_FAILED_NOTICE,
+  sessionNotice,
   stackCard,
   STATE_ICONS,
   STATE_LABELS,
 } from "./app"
 
-const READY: KeyStatus = { vault: "ready", reason: "", stored: false, masked: "" }
+const READY: KeyStatus = { vault: "ready", reason: "", stored: false, masked: "", session: null }
 
 describe("the Docker card", () => {
   it("shows what is going on", () => {
@@ -112,10 +116,14 @@ describe("the key card", () => {
         reason: "No secret store was found.",
         stored: false,
         masked: "",
+        session: null,
       }),
     ).toMatchObject({
       tone: "warn",
-      lines: ["No secret store was found.", "You can still use the app without a key."],
+      lines: [
+        "No secret store was found.",
+        "You can use a key for this session only, which is kept in this app's memory and never saved, or use the app without one.",
+      ],
     })
     expect(keyCard({ ...READY, stored: true, masked: "sk-ant-…ab12" })).toEqual({
       tone: "good",
@@ -203,8 +211,20 @@ describe("the services card", () => {
 })
 
 describe("what is said after saving a key", () => {
-  const saved: KeyStatus = { vault: "ready", reason: "", stored: true, masked: "sk-ant-…ab12" }
-  const unsaved: KeyStatus = { vault: "ready", reason: "", stored: false, masked: "" }
+  const saved: KeyStatus = {
+    vault: "ready",
+    reason: "",
+    stored: true,
+    masked: "sk-ant-…ab12",
+    session: null,
+  }
+  const unsaved: KeyStatus = {
+    vault: "ready",
+    reason: "",
+    stored: false,
+    masked: "",
+    session: null,
+  }
 
   it("says clearly that the key was saved, and what happens next", () => {
     const outcome: KeySave = { saved: true, check: { state: "valid" }, status: saved }
@@ -248,7 +268,13 @@ describe("what is said after saving a key", () => {
   })
 
   it("says that the key already saved is unchanged when a new one is refused", () => {
-    const stored: KeyStatus = { vault: "ready", reason: "", stored: true, masked: "sk-ant-…ab12" }
+    const stored: KeyStatus = {
+      vault: "ready",
+      reason: "",
+      stored: true,
+      masked: "sk-ant-…ab12",
+      session: null,
+    }
     const refused = saveNotice({ saved: false, check: { state: "invalid" }, status: stored }, true)
     expect(refused.text).toMatch(/The key you had saved is unchanged\./)
     const none = saveNotice({ saved: false, check: { state: "invalid" }, status: unsaved }, true)
@@ -282,7 +308,13 @@ describe("a refused key, when the vault was not asked", () => {
     const none = saveNotice(refused, true)
     expect(none).toMatchObject({ tone: "bad", title: "The key was not saved" })
     expect(none.text).not.toMatch(/unchanged/)
-    const stored: KeyStatus = { vault: "ready", reason: "", stored: true, masked: "sk-ant-…ab12" }
+    const stored: KeyStatus = {
+      vault: "ready",
+      reason: "",
+      stored: true,
+      masked: "sk-ant-…ab12",
+      session: null,
+    }
     expect(saveNotice(refused, true, stored).text).toMatch(/The key you had saved is unchanged\./)
   })
 
@@ -329,7 +361,7 @@ describe("the message about the last attempt with the key", () => {
       {
         saved: true,
         check: { state: "valid" },
-        status: { vault: "ready", reason: "", stored: true, masked: "sk-ant-…ab12" },
+        status: { vault: "ready", reason: "", stored: true, masked: "sk-ant-…ab12", session: null },
       },
       false,
     )
@@ -744,6 +776,101 @@ describe("choosing which error to fix", () => {
   })
 })
 
+const SESSION = { masked: "sk-ant-…ab12" }
+
+describe("the card of a key used for this session only", () => {
+  const vaultReady: KeyStatus = { ...READY, session: SESSION }
+  const vaultLocked: KeyStatus = {
+    vault: "unavailable",
+    reason: "The secret store did not answer.",
+    stored: false,
+    masked: "",
+    session: SESSION,
+  }
+
+  it("says that the key is in use, masked, and that it is not saved", () => {
+    const card = keyCard(vaultReady)
+    expect(card).toMatchObject({ tone: "good", title: "You are using a key for this session" })
+    expect(card.lines[0]).toBe("sk-ant-…ab12")
+    expect(card.lines[1]).toContain("kept in this app's memory only, never saved")
+    expect(card.lines[1]).toContain("forgotten when you close the app")
+  })
+
+  it("is honest that the services keep it until they restart without it", () => {
+    expect(keyCard(vaultReady).lines.join(" ")).toContain(
+      "The services keep it until they restart without it.",
+    )
+  })
+
+  it("shows the same when the secret store is locked, which is when it is wanted", () => {
+    expect(keyCard(vaultLocked)).toMatchObject({
+      tone: "good",
+      title: "You are using a key for this session",
+    })
+  })
+
+  it("says that it is used instead of the saved key, when there is one", () => {
+    const both: KeyStatus = { ...vaultReady, stored: true, masked: "sk-ant-…zz99" }
+    expect(keyCard(both).lines).toContain(
+      "It is used instead of the key saved in this computer's secret store.",
+    )
+    expect(keyCard(vaultReady).lines.join(" ")).not.toContain("instead of the key saved")
+  })
+
+  it("never shows more than the masked key", () => {
+    expect(JSON.stringify(keyCard(vaultReady))).not.toMatch(/sk-ant-[A-Za-z0-9_-]{8,}/)
+  })
+})
+
+describe("what is said after a key was sent to be used for this session", () => {
+  const accepted = (state: "valid" | "limited"): KeySession => ({
+    accepted: true,
+    check: { state },
+    session: SESSION,
+  })
+
+  it("says that the key is in use, where it is kept, and what to do next", () => {
+    const stopped = sessionNotice(accepted("valid"), false)
+    expect(stopped).toMatchObject({ tone: "good", title: "Key in use for this session" })
+    expect(stopped.text).toContain("It is kept in this app's memory only, never saved")
+    expect(stopped.text).toContain("Start the services below to use it.")
+    expect(sessionNotice(accepted("valid"), true).text).toContain(
+      "Restart the services below to start using it.",
+    )
+  })
+
+  it("says that Anthropic is limiting its requests, when it is", () => {
+    expect(sessionNotice(accepted("limited"), true).text).toContain(
+      "Anthropic is limiting its requests right now, but the key works.",
+    )
+  })
+
+  it("says why the key is not in use, and that the one in use is unchanged", () => {
+    const refused: KeySession = { accepted: false, check: { state: "invalid" }, session: null }
+    expect(sessionNotice(refused, true)).toEqual({
+      tone: "bad",
+      title: "The key is not in use",
+      text: "Anthropic does not accept this key. Check that you copied all of it.",
+    })
+    expect(sessionNotice({ ...refused, session: SESSION }, true).text).toContain(
+      "The key you were using is unchanged.",
+    )
+  })
+
+  it("has a plain failure for when the app breaks in the middle", () => {
+    expect(SESSION_FAILED_NOTICE).toMatchObject({ tone: "bad", title: "The key is not in use" })
+  })
+
+  it("says that the key was forgotten, and that the services need a restart to stop using it", () => {
+    expect(endSessionNotice(false)).toEqual({
+      tone: "good",
+      title: "Key forgotten",
+      text: "This app no longer holds it.",
+    })
+    expect(endSessionNotice(true).text).toContain("Restart the services below to stop using it.")
+  })
+})
+
 describe("the window", () => {
   it("has its sections in the menu, the panel first and the settings", () => {
     expect(SECTIONS.map((section) => section.id)).toEqual(["panel", "project", "fix", "settings"])
@@ -821,6 +948,22 @@ describe("the page's own code", () => {
     const source = await readFile(join(__dirname, "app.ts"), "utf8")
     expect(source).toMatch(/localStorage\.setItem\(\s*OPTIONS_KEY/)
     expect(source).toMatch(/try \{[^}]*localStorage\.getItem\(OPTIONS_KEY\)/s)
+  })
+
+  it("sends a key to be used for this session only, and never asks to read it back", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source.match(/api\.keyUseOnce\(/g)).toHaveLength(1)
+    expect(source).toMatch(/api\.keyEndSession\(\)/)
+    // The browser's storage holds the layout and the choices about a run, and never a key.
+    const stored = [...source.matchAll(/localStorage\.setItem\(\s*(\w+)/g)].map((found) => found[1])
+    expect(new Set(stored)).toEqual(new Set(["SIDEBAR_KEY", "OPTIONS_KEY"]))
+  })
+
+  it("offers the key of the session when the secret store cannot keep one", async () => {
+    const source = await readFile(join(__dirname, "app.ts"), "utf8")
+    expect(source).toMatch(/"Check and use this session"/)
+    expect(source).toMatch(/"Use this session only"/)
+    expect(source).toMatch(/"Stop using it"/)
   })
 
   it("shows the changes as text, with a sign that does not depend on color", async () => {

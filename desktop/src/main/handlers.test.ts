@@ -4,17 +4,18 @@ import type {
   Bounds,
   FixKind,
   FixResult,
-  KeyStatus,
+  VaultStatus,
   ProjectInfo,
   Section,
   WindowAction,
 } from "../shared/api"
 import { createHandlers, type HandlerDeps } from "./handlers"
 import { API_VERSION, type Fetch } from "./key"
+import { SessionKey } from "./session"
 import { VaultError } from "./vault"
 
 const KEY = `sk-ant-api03-${"AbCdEfGh1234567890_-".repeat(3)}`
-const READY: KeyStatus = { vault: "ready", reason: "", stored: false, masked: "" }
+const READY: VaultStatus = { vault: "ready", reason: "", stored: false, masked: "" }
 
 const DEFAULT_PROJECT: ProjectInfo = {
   chosen: null,
@@ -47,8 +48,10 @@ function setup(
     requests.push(init.headers)
     return { status: options.status ?? 200 }
   }
+  const sessionKey = new SessionKey()
   const deps: HandlerDeps = {
     docker: async () => ({ ok: true, version: "27" }),
+    session: sessionKey,
     vault: {
       status: async () => {
         statusCalls += 1
@@ -143,6 +146,7 @@ function setup(
   }
   return {
     handlers: createHandlers(deps),
+    sessionKey,
     saved,
     opened,
     requests,
@@ -212,6 +216,7 @@ describe("saving a key", () => {
         reason: "No secret store was found.",
         stored: false,
         masked: "",
+        session: null,
       },
     })
     expect(statusCalls()).toBe(0)
@@ -247,6 +252,106 @@ describe("saving a key", () => {
     const { handlers } = setup()
     await handlers["key:save"](KEY)
     expect((await handlers["key:remove"]()).stored).toBe(false)
+  })
+})
+
+describe("using a key for this session only", () => {
+  it("checks it, keeps it in memory, and gives back only its first and last characters", async () => {
+    const { handlers, sessionKey, saved, requests } = setup()
+    const outcome = await handlers["key:use-once"](`  "${KEY}"\n`)
+    expect(outcome).toEqual({
+      accepted: true,
+      check: { state: "valid" },
+      session: { masked: `sk-ant-…${KEY.slice(-4)}` },
+    })
+    expect(sessionKey.get()).toBe(KEY)
+    expect(requests[0]).toEqual({ "x-api-key": KEY, "anthropic-version": API_VERSION })
+    expect(JSON.stringify(outcome)).not.toContain(KEY)
+    expect(saved).toEqual([])
+  })
+
+  it("never asks the secret store anything, because it may be locked", async () => {
+    const { handlers, statusCalls, saved } = setup({ saveError: new VaultError("locked") })
+    await handlers["key:use-once"](KEY)
+    expect(statusCalls()).toBe(0)
+    expect(saved).toEqual([])
+  })
+
+  it("keeps a key that works even if its account is being limited", async () => {
+    const { handlers, sessionKey } = setup({ status: 429 })
+    expect(await handlers["key:use-once"](KEY)).toMatchObject({
+      accepted: true,
+      check: { state: "limited" },
+    })
+    expect(sessionKey.get()).toBe(KEY)
+  })
+
+  it.each([401, 403, 500])("does not use a key that Anthropic answers %i about", async (status) => {
+    const { handlers, sessionKey } = setup({ status })
+    const outcome = await handlers["key:use-once"](KEY)
+    expect(outcome.accepted).toBe(false)
+    expect(outcome.session).toBeNull()
+    expect(sessionKey.get()).toBeNull()
+  })
+
+  it("leaves the key in use as it was when another one is refused", async () => {
+    const { handlers, sessionKey } = setup({ status: 401 })
+    sessionKey.set(`sk-ant-api03-${"ZyXwVuTs0987654321-_".repeat(3)}`)
+    const outcome = await handlers["key:use-once"](KEY)
+    expect(outcome.accepted).toBe(false)
+    expect(outcome.session).not.toBeNull()
+    expect(sessionKey.get()).not.toBe(KEY)
+  })
+
+  it("sends nothing anywhere when the text does not look like a key", async () => {
+    const { handlers, requests, sessionKey } = setup()
+    expect(await handlers["key:use-once"]("not a key")).toEqual({
+      accepted: false,
+      check: { state: "malformed" },
+      session: null,
+    })
+    expect(requests).toEqual([])
+    expect(sessionKey.get()).toBeNull()
+  })
+
+  it.each([undefined, null, 42, {}, ["sk-ant"], "x".repeat(513)])(
+    "refuses what is not a text of a reasonable size (%j)",
+    async (value) => {
+      const { handlers, sessionKey } = setup()
+      await expect(handlers["key:use-once"](value)).rejects.toThrow("the key must be a text")
+      expect(sessionKey.get()).toBeNull()
+    },
+  )
+
+  it("is forgotten when the page says so, and the status says that none is in use", async () => {
+    const { handlers, sessionKey } = setup()
+    await handlers["key:use-once"](KEY)
+    expect((await handlers["key:status"]()).session).toEqual({ masked: `sk-ant-…${KEY.slice(-4)}` })
+    await handlers["key:end-session"]()
+    expect(sessionKey.get()).toBeNull()
+    expect((await handlers["key:status"]()).session).toBeNull()
+  })
+
+  it("is in every status the page gets, and never as more than its mask", async () => {
+    const { handlers } = setup()
+    await handlers["key:use-once"](KEY)
+    const statuses = [
+      await handlers["key:status"](),
+      (await handlers["key:save"](KEY)).status,
+      await handlers["key:remove"](),
+    ]
+    for (const status of statuses) {
+      expect(status?.session).toEqual({ masked: `sk-ant-…${KEY.slice(-4)}` })
+      expect(JSON.stringify(status)).not.toContain(KEY)
+    }
+  })
+
+  it("does not touch the saved key", async () => {
+    const { handlers, saved } = setup()
+    await handlers["key:save"](KEY)
+    expect(saved).toEqual([KEY])
+    await handlers["key:end-session"]()
+    expect((await handlers["key:status"]()).stored).toBe(true)
   })
 })
 

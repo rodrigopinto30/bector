@@ -22,6 +22,7 @@ import type { Fetch } from "./key"
 import { isShellPage } from "./policy"
 import { run } from "./process"
 import { findProjectRoot, readPanelPort } from "./project"
+import { keyForServices, SessionKey } from "./session"
 import { Stack } from "./stack"
 import { KeyVault, vaultFile } from "./vault"
 import { defaultFolder, folderProbe, textFile, Workspace } from "./workspace"
@@ -48,6 +49,7 @@ async function start(): Promise<void> {
     safeStorage,
     vaultFile(join(app.getPath("userData"), "anthropic-key.bin")),
   )
+  const sessionKey = new SessionKey()
   const workspace = new Workspace({
     store: textFile(join(app.getPath("userData"), "project.json")),
     probe: folderProbe(),
@@ -61,7 +63,7 @@ async function start(): Promise<void> {
     root,
     run,
     readEnv,
-    key: () => vault.load(),
+    key: () => keyForServices(sessionKey, vault),
     workspace: () => workspace.plan(),
     sameFolder: (a, b) => workspace.same(a, b),
     ping: async (url) => {
@@ -88,6 +90,7 @@ async function start(): Promise<void> {
   const handlers = createHandlers({
     docker: () => checkDocker(run),
     vault,
+    session: sessionKey,
     stack,
     workspace,
     fix,
